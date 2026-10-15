@@ -3,8 +3,21 @@ export const cut = (s, n) => String(s ?? '').length > n ? String(s).slice(0, n -
 export const esc = s => String(s ?? '').replace(/[\\*_~`|>]/g, '\\$&');
 export const MODE = { random: '🎲 랜덤 편성', manual: '👥 직접 편성', legacy_mixed: '📌 기존 혼합 편성' };
 export const END = { round_robin: '1회 풀리그', match_limit: '전체 최대 판수', points_target: '목표 승점' };
+const ROLE_ICONS = { BIG: '🧱', SCORER: '🔥', MAKER: '🎯' };
+const BUTTON_ICONS = {
+  '랜덤 편성': '🎲', '편성 확정': '✅', '선수 교체': '🔄', '팀장 변경': '👑', '팀 기권': '🏳️',
+  '대진 관리': '⚔️', '승점 수정': '🏆', '결과 취소': '↩️', '채널 연결': '🔗', '팀별 이동': '🎤',
+  '역할별 이동': '🧭', '대기실 이동': '🪑', '새로고침': '🔄', '패널 복구': '🛠️', '내전 종료': '🏁',
+  '개인 참가': '🙋', '대타 등록': '🪑', '참가 취소': '❌', '내 정보': '👤',
+  '1회 풀리그': '🔁', '전체 최대 판수': '🎮', '목표 승점': '🎯', '취소': '❌', '확정': '✅',
+  '대타 등록 완료': '✅', '팀장 변경 확정': '👑', '선수 교체 확정': '🔄', '기권 확정': '🏳️',
+  '결과 확인': '✅', '결과가 다름': '⚠️',
+};
 export const row = (...components) => ({ type: 1, components: components.flat() });
-export const button = (label, id, style = 2, disabled = false) => ({ type: 2, label, custom_id: id, style, disabled });
+export const button = (label, id, style = 2, disabled = false) => {
+  const icon = BUTTON_ICONS[label] || (label.startsWith('팀장 가능:') ? '👑' : label.startsWith('직접 배정:') ? '📌' : /^TEAM \d+ 승리$/.test(label) ? '🏆' : null);
+  return { type: 2, label: icon ? `${icon} ${label}` : label, custom_id: id, style, disabled };
+};
 export function select(id, placeholder, options, { min = 1, max = 1 } = {}) {
   const empty = !options.length;
   return row({ type: 3, custom_id: id, placeholder: cut(placeholder, 150), min_values: min, max_values: empty ? 1 : Math.min(max, options.length), disabled: empty,
@@ -19,14 +32,14 @@ export function modal(id, title, label, value = '', placeholder = '') {
 export function setupView(w) {
   const d = w.data, base = `w:${w.id}`;
   return { content: null, embeds: [{ title: d.mode ? '🏀 종료 방식 선택' : '🏀 내전 편성 모드 선택', color: 0xf1c40f,
-    description: d.mode ? `${MODE[d.mode]}\n종료 기준을 선택하세요.` : '랜덤 편성: 역할만 신청하고 운영진이 팀을 섞습니다.\n직접 편성: 참가자가 원하는 팀과 역할을 선택합니다.',
-    fields: [{ name: '제목', value: esc(d.title) }, { name: '승리 승점', value: `${d.winPoints}점` }] }],
+    description: d.mode ? `${MODE[d.mode]}\n종료 기준을 선택하세요.` : '🎲 랜덤 편성: 역할만 신청하고 운영진이 팀을 섞습니다.\n👥 직접 편성: 참가자가 원하는 팀과 역할을 선택합니다.',
+    fields: [{ name: '📝 제목', value: esc(d.title) }, { name: '🏆 승리 승점', value: `${d.winPoints}점` }] }],
     components: d.mode ? [row(button('1회 풀리그', `${base}:end:round_robin`, 1), button('전체 최대 판수', `${base}:end:match_limit`, 3), button('목표 승점', `${base}:end:points_target`, 3)), row(button('취소', `${base}:close`))] :
       [row(button('🎲 랜덤 편성', `${base}:mode:random`, 1), button('👥 직접 편성', `${base}:mode:manual`, 3)), row(button('취소', `${base}:close`))] };
 }
 export function registrationView(s, w) {
   const p = w.data.p, prefix = `w:${w.id}`, manual = s.mode !== 'random';
-  const opts = (secondary = false) => [ ...(secondary ? [{ label: '보조 역할 없음', value: 'NONE', default: !p.secondaryRole }] : []), ...ROLE_KEYS.flatMap(r => ROLES[r].map(pos => ({ label: `${r} · ${pos}`, value: `${r}|${pos}`, default: (secondary ? p.secondaryRole === r && p.secondaryPosition === pos : p.primaryRole === r && p.primaryPosition === pos) }))) ];
+  const opts = (secondary = false) => [ ...(secondary ? [{ label: '보조 역할 없음', value: 'NONE', default: !p.secondaryRole }] : []), ...ROLE_KEYS.flatMap(r => ROLES[r].map(pos => ({ label: `${ROLE_ICONS[r]} ${r} · ${pos}`, value: `${r}|${pos}`, default: (secondary ? p.secondaryRole === r && p.secondaryPosition === pos : p.primaryRole === r && p.primaryPosition === pos) }))) ];
   const components = [select(`${prefix}:primary`, '주 역할·포지션', opts()), select(`${prefix}:secondary`, '보조 역할·포지션', opts(true))];
   if (manual) {
     const options = s.mode === 'legacy_mixed' ? [{ label: '랜덤 배정', value: 'RANDOM', default: p.teamNo == null }] : [];
@@ -45,19 +58,19 @@ export function registrationView(s, w) {
 export function subView(w) {
   const p = w.data, prefix = `w:${w.id}`;
   return { content: '**🪑 대타 등록**\n가능한 역할과 포지션을 선택하세요.', embeds: [], components: [
-    select(`${prefix}:roles`, '가능한 역할 (복수 선택)', ROLE_KEYS.map(r => ({ label: r, value: r, default: p.roles.includes(r) })), { max: 3 }),
+    select(`${prefix}:roles`, '가능한 역할 (복수 선택)', ROLE_KEYS.map(r => ({ label: `${ROLE_ICONS[r]} ${r}`, value: r, default: p.roles.includes(r) })), { max: 3 }),
     select(`${prefix}:positions`, '가능한 포지션 (복수 선택)', ['C', 'PF', 'SF', 'SG', 'PG'].map(pos => ({ label: pos, value: pos, default: p.positions.includes(pos) })), { max: 5 }),
     row(button('대타 등록 완료', `${prefix}:submit`, 1), button('취소', `${prefix}:close`)) ] };
 }
 export function publicPanel(s) {
   const recruiting = s.status === 'recruiting', ended = s.status === 'ended';
   const embed = { title: cut(`🏀 ${s.title}`, 256), color: ended ? 0x2ecc71 : recruiting ? 0xf1c40f : 0xe74c3c,
-    description: `${ended ? '🏁 종료' : recruiting ? '🟡 모집 중' : '🔴 진행 중'} · ${MODE[s.mode]}\n참가 ${s.participants.length}명 · ${s.teams.length}팀 · 대타 ${s.subs.length}명\n${END[s.endMode]}${s.target ? ` · 목표 ${s.target}${s.endMode === 'match_limit' ? '경기' : '점'}` : ''} · 승리 +${s.winPoints}점`, fields: [] };
+    description: `${ended ? '🏁 종료' : recruiting ? '🟡 모집 중' : '🔴 진행 중'} · ${MODE[s.mode]}\n👤 참가 ${s.participants.length}명 · 👥 ${s.teams.length}팀 · 🪑 대타 ${s.subs.length}명\n${END[s.endMode]}${s.target ? ` · 목표 ${s.target}${s.endMode === 'match_limit' ? '경기' : '점'}` : ''} · 승리 +${s.winPoints}점`, fields: [] };
   const add = (name, value) => embed.fields.push({ name: cut(name, 256), value: cut(value || '없음', 1024), inline: false });
   if (recruiting) {
     for (const r of ROLE_KEYS) {
       const main = s.participants.filter(p => p.primaryRole === r), flex = s.participants.filter(p => p.secondaryRole === r);
-      add(`${r} · 주 ${main.length} + 보조 ${flex.length} = 가능 ${main.length + flex.length}명`, cut('**주 역할**\n' + (main.slice(0, 8).map(p => `• ${esc(cut(p.name, 24))} · ${p.primaryPosition}${p.teamNo ? ` · TEAM ${p.teamNo}(${p.fixedRole})` : ''}${p.captain ? ' 👑' : ''}`).join('\n') || '등록 없음') + (main.length > 8 ? `\n외 ${main.length - 8}명` : '') + (flex.length ? '\n**보조 가능**\n' + flex.slice(0, 4).map(p => `• ${esc(cut(p.name, 24))} → ${p.secondaryPosition}`).join('\n') + (flex.length > 4 ? `\n외 ${flex.length - 4}명` : '') : ''), s.teams.length > 10 ? 400 : 800));
+      add(`${ROLE_ICONS[r]} ${r} · 주 ${main.length} + 보조 ${flex.length} = 가능 ${main.length + flex.length}명`, cut('**주 역할**\n' + (main.slice(0, 8).map(p => `• ${esc(cut(p.name, 24))} · ${p.primaryPosition}${p.teamNo ? ` · TEAM ${p.teamNo}(${p.fixedRole})` : ''}${p.captain ? ' 👑' : ''}`).join('\n') || '등록 없음') + (main.length > 8 ? `\n외 ${main.length - 8}명` : '') + (flex.length ? '\n**보조 가능**\n' + flex.slice(0, 4).map(p => `• ${esc(cut(p.name, 24))} → ${p.secondaryPosition}`).join('\n') + (flex.length > 4 ? `\n외 ${flex.length - 4}명` : '') : ''), s.teams.length > 10 ? 400 : 800));
     }
     const fixed = [...new Set(s.participants.filter(p => p.teamNo).map(p => p.teamNo))].sort((a, b) => a - b);
     if (fixed.length) add('📌 직접 선택 현황', fixed.map(n => { const slots = s.participants.filter(p => p.teamNo === n).map(p => p.fixedRole); return `TEAM ${n} · ${slots.length}/3 · 빈 역할 ${ROLE_KEYS.filter(r => !slots.includes(r)).join('/') || '없음 ✅'}`; }).join('\n'));
@@ -78,7 +91,7 @@ export function publicPanel(s) {
 }
 export function adminPanel(s) {
   const id = `a:${s.id}`, running = s.status === 'running', ended = s.status === 'ended';
-  return { content: null, embeds: [{ title: '🛠️ 내전 관리', color: 0x3498db, description: `${esc(s.title)}\n${MODE[s.mode]} · ${s.status}\n참가 ${s.participants.length}명 · ${s.teams.length}팀 · ${s.fixtures.filter(f => f.status === 'completed').length}경기 완료`, fields: [{ name: '지금 할 일', value: ended ? '종료된 내전입니다.' : s.status === 'recruiting' ? s.mode === 'manual' ? '팀 직접 선택 현황을 확인하고 편성 확정을 누르세요.' : '랜덤 편성 → 미리보기 → 편성 확정' : '팀장이 경기 종료에서 결과를 입력·확인합니다.' }, ...(s.panelError ? [{ name: '⚠️ 공개 패널 전송 문제', value: cut(esc(s.panelError) + '\n설정 확인 후 아래 패널 복구를 눌러주세요.', 1000) }] : [])] }], components: [
+  return { content: null, embeds: [{ title: '🛠️ 내전 관리', color: 0x3498db, description: `${esc(s.title)}\n${MODE[s.mode]} · ${s.status}\n👤 참가 ${s.participants.length}명 · 👥 ${s.teams.length}팀 · ✅ ${s.fixtures.filter(f => f.status === 'completed').length}경기 완료`, fields: [{ name: '➡️ 지금 할 일', value: ended ? '종료된 내전입니다.' : s.status === 'recruiting' ? s.mode === 'manual' ? '팀 직접 선택 현황을 확인하고 편성 확정을 누르세요.' : '랜덤 편성 → 미리보기 → 편성 확정' : '팀장이 경기 종료에서 결과를 입력·확인합니다.' }, ...(s.panelError ? [{ name: '⚠️ 공개 패널 전송 문제', value: cut(esc(s.panelError) + '\n설정 확인 후 아래 패널 복구를 눌러주세요.', 1000) }] : [])] }], components: [
     row(button('랜덤 편성', `${id}:draft`, 1, s.status !== 'recruiting' || s.mode === 'manual'), button('편성 확정', `${id}:finalize`, 3, s.status !== 'recruiting')),
     row(button('선수 교체', `${id}:substitute`, 1, !running), button('팀장 변경', `${id}:captain`, 2, !running), button('팀 기권', `${id}:withdraw`, 4, !running)),
     row(button('대진 관리', `${id}:fixtures`, 1, !running), button('승점 수정', `${id}:points`, 2, !running), button('결과 취소', `${id}:undo`, 2, !running)),
