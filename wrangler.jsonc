@@ -7,15 +7,15 @@
   "workers_dev": true,
   "d1_databases": [{
     "binding": "DB", "database_name": "fsr-scrim",
-    "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID",
+    "database_id": "95a4e595-8964-417b-9b82-00e416d20d7b",
     "migrations_dir": "migrations"
   }],
   "triggers": { "crons": ["* * * * *"] },
   "vars": {
-    "WORKER_URL": "",
-    "APPLICATION_ID": "REPLACE_WITH_DISCORD_APPLICATION_ID",
-    "DISCORD_PUBLIC_KEY": "REPLACE_WITH_DISCORD_PUBLIC_KEY",
-    "ADMIN_ROLE_ID": "",
+    "WORKER_URL": "https://fsr-scrim-bot.cjswo316.workers.dev",
+    "APPLICATION_ID": "1549399405088612462",
+    "DISCORD_PUBLIC_KEY": "b28e73f71367601f76ee013a011f111334524426bfaf27a0acc28c707128cf60",
+    "ADMIN_ROLE_ID": "1559462141956718702, 1547226502368722944, 1545778178621055036",
     "WAITING_CHANNEL_NAME": "대기실",
     "TEAM_CHANNEL_TEMPLATE": "팀 {number}",
     "BIG_CHANNEL_NAME": "빅", "MAKER_CHANNEL_NAME": "메이커", "SCORER_CHANNEL_NAME": "스코어러",
