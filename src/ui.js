@@ -78,12 +78,12 @@ export function publicPanel(s) {
 }
 export function adminPanel(s) {
   const id = `a:${s.id}`, running = s.status === 'running', ended = s.status === 'ended';
-  return { content: null, embeds: [{ title: '🛠️ 내전 관리', color: 0x3498db, description: `${esc(s.title)}\n${MODE[s.mode]} · ${s.status}\n참가 ${s.participants.length}명 · ${s.teams.length}팀 · ${s.fixtures.filter(f => f.status === 'completed').length}경기 완료`, fields: [{ name: '지금 할 일', value: ended ? '종료된 내전입니다.' : s.status === 'recruiting' ? s.mode === 'manual' ? '팀 직접 선택 현황을 확인하고 편성 확정을 누르세요.' : '랜덤 편성 → 미리보기 → 편성 확정' : '팀장이 경기 종료에서 결과를 입력·확인합니다.' }] }], components: [
+  return { content: null, embeds: [{ title: '🛠️ 내전 관리', color: 0x3498db, description: `${esc(s.title)}\n${MODE[s.mode]} · ${s.status}\n참가 ${s.participants.length}명 · ${s.teams.length}팀 · ${s.fixtures.filter(f => f.status === 'completed').length}경기 완료`, fields: [{ name: '지금 할 일', value: ended ? '종료된 내전입니다.' : s.status === 'recruiting' ? s.mode === 'manual' ? '팀 직접 선택 현황을 확인하고 편성 확정을 누르세요.' : '랜덤 편성 → 미리보기 → 편성 확정' : '팀장이 경기 종료에서 결과를 입력·확인합니다.' }, ...(s.panelError ? [{ name: '⚠️ 공개 패널 전송 문제', value: cut(esc(s.panelError) + '\n설정 확인 후 아래 패널 복구를 눌러주세요.', 1000) }] : [])] }], components: [
     row(button('랜덤 편성', `${id}:draft`, 1, s.status !== 'recruiting' || s.mode === 'manual'), button('편성 확정', `${id}:finalize`, 3, s.status !== 'recruiting')),
     row(button('선수 교체', `${id}:substitute`, 1, !running), button('팀장 변경', `${id}:captain`, 2, !running), button('팀 기권', `${id}:withdraw`, 4, !running)),
     row(button('대진 관리', `${id}:fixtures`, 1, !running), button('승점 수정', `${id}:points`, 2, !running), button('결과 취소', `${id}:undo`, 2, !running)),
     row(button('채널 연결', `${id}:voiceConnect`, 2, ended), button('팀별 이동', `${id}:voiceTeams`, 3, ended), button('역할별 이동', `${id}:voiceRoles`, 2, ended), button('대기실 이동', `${id}:voiceWaiting`, 2, ended)),
-    row(button('새로고침', `${id}:refresh`), button('내전 종료', `${id}:finish`, 4, ended)) ] };
+    row(button('새로고침', `${id}:refresh`), button('패널 복구', `${id}:repairPanel`, 3, ended), button('내전 종료', `${id}:finish`, 4, ended)) ] };
 }
 export function flowView(s, w) {
   const d = w.data, p = `w:${w.id}`, active = s.teams.filter(t => !t.withdrawnAt), opts = active.map(t => ({ label: `TEAM ${t.no}`, value: t.id }));

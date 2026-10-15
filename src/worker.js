@@ -1,7 +1,7 @@
 import { Store } from './storage.js';
 import { applyAction, newScrim, ensure, UserError, currentFixtures, teamById, lottery, ROLES } from './domain.js';
 import { message, note, defer, modal, setupView, registrationView, subView, publicPanel, adminPanel, flowView, esc, cut } from './ui.js';
-import { api, replyJob, DiscordError, discoverVoice, voiceTargets, moveVoiceChunk } from './discord.js';
+import { api, replyJob, DiscordError, describeDiscordError, discoverVoice, voiceTargets, moveVoiceChunk } from './discord.js';
 
 const encoder = new TextEncoder();
 const hex = s => Uint8Array.from(s.match(/../g) || [], v => Number.parseInt(v, 16));
@@ -35,17 +35,21 @@ async function validInternal(env, body, header) {
   try { const d = JSON.parse(body); if (Math.abs(Date.now() - d.timestamp) > 60_000) return false; const key = await crypto.subtle.importKey('raw', encoder.encode(env.DISCORD_TOKEN), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']); return await crypto.subtle.verify('HMAC', key, hex(header), encoder.encode(body)); } catch { return false; }
 }
 export async function flushPanel(env, store, id, guildId, force = false) {
-  const lease = await store.claimPanel(id, force); if (!lease) return;
-  let revision = -1, succeeded = false;
+  const lease = await store.claimPanel(id, force); if (!lease) return { pending: true };
+  let revision = -1, succeeded = false, snapshot;
   try {
-    const row = await store.get(id, guildId), s = row.value; revision = row.revision;
-    if (!s.panel || s.panel.deleted) { succeeded = true; return; }
+    const row = await store.get(id, guildId), s = row.value; snapshot = s; revision = row.revision;
+    if (!s.panel || s.panel.deleted) { succeeded = true; return { missing: true }; }
     const body = publicPanel(s);
     if (s.panel.messageId) {
       try { await api(env, `/channels/${s.panel.channelId}/messages/${s.panel.messageId}`, { method: 'PATCH', body }); }
-      catch (e) { if (e.status === 404) { await store.mutate(id, guildId, `panel-missing:${s.panel.messageId}`, state => { state.panel.deleted = true; return '패널이 삭제되어 갱신을 중지했습니다.'; }, { dirty: false }); } else throw e; }
+      catch (e) {
+        if (e.code === 10008) await store.mutate(id, guildId, `panel-missing:${lease}`, state => { if (state.panel?.messageId === s.panel.messageId) state.panel.deleted = true; return '패널이 삭제되어 복구가 필요합니다.'; }, { dirty: false });
+        throw e;
+      }
     } else {
-      const sent = await api(env, `/channels/${s.panel.channelId}/messages`, { method: 'POST', body: { ...body, nonce: s.id.slice(-25), enforce_nonce: true } });
+      const sent = await api(env, `/channels/${s.panel.channelId}/messages`, { method: 'POST', body: { ...body, nonce: (s.panel.nonce || s.id).slice(-25), enforce_nonce: true } });
+      ensure(sent?.id, 'Discord가 공개 패널 메시지 ID를 반환하지 않았습니다. 패널 복구를 다시 눌러주세요.');
       const written = await store.mutate(id, guildId, `panel:${sent.id}`, state => { state.panel.messageId ||= sent.id; return '패널 연결'; }, { dirty: false });
       // Record the new panel id, then render a newer snapshot if a signup arrived meanwhile.
       const fresh = await store.get(id, guildId); revision = fresh.revision;
@@ -53,7 +57,21 @@ export async function flushPanel(env, store, id, guildId, force = false) {
         await api(env, `/channels/${fresh.value.panel.channelId}/messages/${sent.id}`, { method: 'PATCH', body: publicPanel(fresh.value) });
       }
     }
+    if (s.panelError) {
+      await store.mutate(id, guildId, `panel-ok:${lease}`, state => { state.panelError = null; return '공개 패널 정상'; }, { dirty: false });
+      const fresh = await store.get(id, guildId);
+      // Only absorb our own error-clear write; keep concurrent signups dirty.
+      if (fresh.revision === revision + 1) revision = fresh.revision;
+    }
     succeeded = true;
+    return { published: true };
+  } catch (e) {
+    if (snapshot) {
+      const reason = e instanceof UserError ? e.message : describeDiscordError(e);
+      if (snapshot.panelError !== reason) await store.mutate(id, guildId, `panel-error:${lease}`, state => { if (state.panel?.channelId === snapshot.panel?.channelId) state.panelError = reason; return '공개 패널 전송 실패'; }, { dirty: false }).catch(() => {});
+      console.error('Public panel delivery failed', id, e.status || e.name, e.code || '');
+    }
+    throw e;
   } finally { await store.releasePanel(id, lease, revision, succeeded); }
 }
 async function queue(i, env, store, actor, kind, data, scrimId, ctx) {
@@ -92,7 +110,7 @@ export async function routeInteraction(i, env, store, ctx) {
     const s = (await store.get(id, i.guild_id)).value;
     if (scope === 'a') {
       requireManager(actor);
-      if (['draft', 'finalize', 'voiceConnect', 'voiceTeams', 'voiceRoles', 'voiceWaiting', 'refresh'].includes(op)) return queue(i, env, store, actor, op, {}, s.id, ctx);
+      if (['draft', 'finalize', 'voiceConnect', 'voiceTeams', 'voiceRoles', 'voiceWaiting', 'refresh', 'repairPanel'].includes(op)) return queue(i, env, store, actor, op, {}, s.id, ctx);
       ensure(s.status !== 'ended', '종료된 내전입니다.');
       if (['finish', 'undo'].includes(op)) return showFlow(store, s, actor, { kind: 'confirm', op, label: op === 'finish' ? '내전 종료 (음성채널은 유지)' : '마지막 결과와 승점 취소' });
       if (['substitute', 'captain', 'withdraw', 'points', 'fixtures'].includes(op)) { ensure(s.status === 'running', '편성 확정 후 사용할 수 있습니다.'); return showFlow(store, s, actor, { kind: 'flow', op }); }
@@ -178,8 +196,17 @@ export async function runJob(env, id) {
     let s, notice = p.notice || '';
     if (p.kind === 'create') {
       requireManager(p.actor); s = newScrim(`w${id}`, job.guild_id, p.data); s.panel = { channelId: p.channelId, messageId: null };
-      await store.create(s); p.scrimId = s.id; notice = '내전 모집을 시작했습니다.';
+      await store.create(s); p.scrimId = s.id; s = (await store.get(s.id, job.guild_id)).value; notice = '내전 모집을 시작했습니다.';
     } else if (p.kind === 'refresh') { requireManager(p.actor); await store.markDirty(p.scrimId, job.guild_id); s = (await store.get(p.scrimId, job.guild_id)).value; notice = '공개 현황을 갱신합니다.'; }
+    else if (p.kind === 'repairPanel') {
+      requireManager(p.actor);
+      const result = await store.mutate(p.scrimId, job.guild_id, id, state => {
+        ensure(state.status !== 'ended', '종료된 내전입니다.');
+        if (!state.panel?.messageId || state.panel.deleted || state.panelError?.includes('10003')) state.panel = { channelId: p.channelId, messageId: null, nonce: id };
+        return '기존 내전의 공개 패널을 복구합니다.';
+      });
+      s = result.state; notice = result.result;
+    }
     else if (['voiceTeams', 'voiceRoles', 'voiceWaiting'].includes(p.kind)) { requireManager(p.actor); s = (await store.get(p.scrimId, job.guild_id)).value; ensure(s.status !== 'ended', '종료된 내전입니다.'); }
     else {
       if (!['register', 'subregister', 'cancel', 'report', 'confirm', 'dispute'].includes(p.kind)) requireManager(p.actor);
@@ -206,12 +233,28 @@ export async function runJob(env, id) {
       if (!finished) { await store.checkpoint(job, p); await replyJob(env, job, `🎤 이동 처리 중 (${p.voice.index}/${p.voice.targets.length})`); await nudge(env, { kind: 'job', id }).catch(() => {}); return; }
       notice = `${notice ? notice + '\n' : ''}🎤 이동 ${p.voice.moved}명 · 미접속/조건 제외/이미 도착 ${p.voice.skipped}명 · 권한 등 실패 ${p.voice.failed}명`;
     }
+    // Publication is a separate outcome: saved scrims/results must not be reported as lost.
+    const needsPublication = ['create', 'refresh', 'repairPanel'].includes(p.kind);
+    if (needsPublication && s) {
+      try {
+        await wait(650);
+        const result = await flushPanel(env, store, s.id, s.guildId);
+        notice += result?.published ? '\n공개 패널을 채널에 게시했습니다.' : result?.missing ? '\n⚠️ 공개 패널이 없습니다. /내전관리 → 패널 복구를 눌러주세요.' : '\n공개 패널 갱신을 처리 중입니다. 잠시 후 채널을 확인해주세요.';
+      } catch (e) {
+        notice = `내전 데이터는 저장되어 있습니다. 공개 패널 전송에 실패했습니다.\n${e instanceof UserError ? e.message : describeDiscordError(e)}\n설정을 확인한 후 /내전관리 → 패널 복구를 눌러주세요. 새 내전을 다시 열거나 DB를 초기화할 필요는 없습니다.`;
+        await replyJob(env, job, `⚠️ ${notice}`); await store.finishJob(job); return;
+      }
+    }
     await replyJob(env, job, `✅ ${notice}`);
     await store.finishJob(job);
-    if (s) { await wait(650); await flushPanel(env, store, s.id, s.guildId); const fresh = await store.get(s.id, s.guildId); if (fresh.dirty_at != null) await nudge(env, { kind: 'panel', id: s.id, guildId: s.guildId }).catch(() => {}); }
+    if (s && !needsPublication) {
+      // Background panel errors cannot overwrite a successfully saved operation.
+      try { await wait(650); await flushPanel(env, store, s.id, s.guildId); const fresh = await store.get(s.id, s.guildId); if (fresh.dirty_at != null) await nudge(env, { kind: 'panel', id: s.id, guildId: s.guildId }).catch(() => {}); }
+      catch { /* flushPanel retains dirty state and a safe diagnostic for recovery. */ }
+    }
   } catch (e) {
     if (e instanceof UserError || (e instanceof DiscordError && [400, 401, 403, 404].includes(e.status))) {
-      const reason = e instanceof UserError ? e.message : 'Discord 접근 권한·봇 토큰·채널 설정을 확인해주세요.';
+      const reason = e instanceof UserError ? e.message : describeDiscordError(e);
       await replyJob(env, job, `⚠️ ${reason}`).catch(() => {}); await store.finishJob(job, 'failed', reason);
     } else if (job.attempts >= 8 || Date.now() - job.created_at > 12 * 60_000) {
       await replyJob(env, job, '⚠️ 일시 오류가 반복됐습니다. /내전상태로 반영 여부를 확인하고 다시 시도해주세요.').catch(() => {});
@@ -243,7 +286,7 @@ async function scheduled(env) {
 export default {
   async fetch(request, env, ctx) {
     const path = new URL(request.url).pathname;
-    if (path === '/health' && request.method === 'GET') return Response.json({ ok: true, version: '2.0.0' });
+    if (path === '/health' && request.method === 'GET') return Response.json({ ok: true, version: '2.0.1' });
     if (request.method !== 'POST') return new Response('Not found', { status: 404 });
     const text = await request.text(); if (text.length > 65_536) return new Response('Too large', { status: 413 });
     if (path === '/_run') {
