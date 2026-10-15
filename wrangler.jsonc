@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "fsr-scrim-bot",
+  "main": "src/worker.js",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["global_fetch_strictly_public"],
+  "workers_dev": true,
+  "d1_databases": [{
+    "binding": "DB", "database_name": "fsr-scrim",
+    "database_id": "REPLACE_WITH_YOUR_D1_DATABASE_ID",
+    "migrations_dir": "migrations"
+  }],
+  "triggers": { "crons": ["* * * * *"] },
+  "vars": {
+    "WORKER_URL": "",
+    "APPLICATION_ID": "REPLACE_WITH_DISCORD_APPLICATION_ID",
+    "DISCORD_PUBLIC_KEY": "REPLACE_WITH_DISCORD_PUBLIC_KEY",
+    "ADMIN_ROLE_ID": "",
+    "WAITING_CHANNEL_NAME": "대기실",
+    "TEAM_CHANNEL_TEMPLATE": "팀 {number}",
+    "BIG_CHANNEL_NAME": "빅", "MAKER_CHANNEL_NAME": "메이커", "SCORER_CHANNEL_NAME": "스코어러",
+    "ENDED_PANEL_DELETE_MINUTES": "60"
+  }
+}
