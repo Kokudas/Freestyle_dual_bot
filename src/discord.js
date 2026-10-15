@@ -1,5 +1,5 @@
 import { UserError } from './domain.js';
-export const DISCORD_USER_AGENT = 'DiscordBot (https://developers.cloudflare.com/workers/, 2.0.3) FSR-Scrim-Workers';
+export const DISCORD_USER_AGENT = 'DiscordBot (https://developers.cloudflare.com/workers/, 2.0.4) FSR-Scrim-Workers';
 export class DiscordError extends Error {
   constructor(status, retryAfter = 0, data = {}, scope = 'bot', diagnostic = {}) {
     super(`Discord API ${status}`); this.status = status; this.retryAfter = retryAfter;

@@ -25,7 +25,7 @@ export function select(id, placeholder, options, { min = 1, max = 1 } = {}) {
 }
 export const message = (data, update = false) => ({ type: update ? 7 : 4, data: { allowed_mentions: { parse: [] }, ...data, ...(update ? {} : { flags: 64 }) } });
 export const note = content => message({ content: cut(content, 1900) });
-export const defer = () => ({ type: 5, data: { flags: 64 } });
+export const defer = (ephemeral = true) => ({ type: 5, data: { flags: ephemeral ? 64 : 0 } });
 export function modal(id, title, label, value = '', placeholder = '') {
   return { type: 9, data: { custom_id: id, title: cut(title, 45), components: [row({ type: 4, custom_id: 'value', label: cut(label, 45), style: 1, required: true, min_length: 1, max_length: 100, ...(value ? { value } : {}), ...(placeholder ? { placeholder } : {}) })] } };
 }

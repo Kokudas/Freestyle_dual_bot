@@ -34,12 +34,15 @@ async function validInternal(env, body, header) {
   if (!/^[a-f\d]{64}$/i.test(header || '')) return false;
   try { const d = JSON.parse(body); if (Math.abs(Date.now() - d.timestamp) > 60_000) return false; const key = await crypto.subtle.importKey('raw', encoder.encode(env.DISCORD_TOKEN), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']); return await crypto.subtle.verify('HMAC', key, hex(header), encoder.encode(body)); } catch { return false; }
 }
-export async function flushPanel(env, store, id, guildId, force = false) {
+const needsNewPanel = s => !s.panel?.messageId || !s.panel?.channelId || ['undefined', 'null'].includes(String(s.panel.channelId)) || s.panel.deleted || s.panelError?.includes('10003');
+export async function flushPanel(env, store, id, guildId, force = false, publication = null) {
   const lease = await store.claimPanel(id, force); if (!lease) return { pending: true };
   let revision = -1, succeeded = false, snapshot;
   try {
     const row = await store.get(id, guildId), s = row.value; snapshot = s; revision = row.revision;
     if (!s.panel || s.panel.deleted) { succeeded = true; return { missing: true }; }
+    // A competing repair must not turn its own response into a second roster.
+    if (publication && s.panel.publicationJob !== publication.id) return { superseded: true };
     ensure(s.panel.channelId && !['undefined', 'null'].includes(String(s.panel.channelId)), '공개 패널을 보낼 채널 ID가 저장되지 않았습니다. 현재 텍스트 채널에서 /내전관리 → 패널 복구를 눌러주세요.');
     const body = publicPanel(s);
     if (s.panel.messageId) {
@@ -49,11 +52,24 @@ export async function flushPanel(env, store, id, guildId, force = false) {
         throw e;
       }
     } else {
-      const sent = await api(env, `/channels/${s.panel.channelId}/messages`, { method: 'POST', body: { ...body, nonce: (s.panel.nonce || s.id).slice(-25), enforce_nonce: true } });
+      // Cron cannot create an interaction response: its short-lived token belongs
+      // to the durable job. Never fall back to the failing channel-message POST.
+      if (s.panel.transport === 'interaction' && !publication) return { pending: true };
+      const sent = s.panel.transport === 'interaction'
+        ? await api(env, `/webhooks/${publication.data.applicationId}/${publication.data.token}/messages/@original`, { method: 'PATCH', token: false, body: { content: null, ...body } })
+        : await api(env, `/channels/${s.panel.channelId}/messages`, { method: 'POST', body: { ...body, nonce: (s.panel.nonce || s.id).slice(-25), enforce_nonce: true } });
       ensure(sent?.id, 'Discord가 공개 패널 메시지 ID를 반환하지 않았습니다. 패널 복구를 다시 눌러주세요.');
-      const written = await store.mutate(id, guildId, `panel:${sent.id}`, state => { state.panel.messageId ||= sent.id; return '패널 연결'; }, { dirty: false });
+      const written = await store.mutate(id, guildId, `panel:${sent.id}`, state => {
+        // A repair may have superseded this send while Discord was responding.
+        if (publication && state.panel?.publicationJob !== publication.id) return '다른 패널 복구가 진행 중입니다.';
+        state.panel.messageId ||= sent.id; return '패널 연결';
+      }, { dirty: false });
       // Record the new panel id, then render a newer snapshot if a signup arrived meanwhile.
       const fresh = await store.get(id, guildId); revision = fresh.revision;
+      if (publication && fresh.value.panel?.publicationJob !== publication.id) {
+        await replyJob(env, publication, '다른 운영진이 공개 패널을 복구하고 있습니다. 채널의 최신 패널을 사용해주세요.');
+        return { superseded: true };
+      }
       if (fresh.revision > row.revision + (written.replay ? 0 : 1)) {
         await api(env, `/channels/${fresh.value.panel.channelId}/messages/${sent.id}`, { method: 'PATCH', body: publicPanel(fresh.value) });
       }
@@ -76,9 +92,18 @@ export async function flushPanel(env, store, id, guildId, force = false) {
   } finally { await store.releasePanel(id, lease, revision, succeeded); }
 }
 async function queue(i, env, store, actor, kind, data, scrimId, ctx) {
-  const id = await store.enqueue(i, actor, kind, data, scrimId);
+  const publicReply = kind === 'create' || (kind === 'repairPanel' && needsNewPanel((await store.get(scrimId, i.guild_id)).value));
+  const id = await store.enqueue(i, actor, kind, data, scrimId, { publicReply });
   ctx.waitUntil(runJob(env, id).catch(() => console.error('Job dispatch failed; scheduled retry retained.')));
-  return defer();
+  return defer(!publicReply);
+}
+async function jobNotice(env, store, job, content) {
+  // Once the original response IS the public panel, a status notice would erase it.
+  if (job.data.publicReply && job.data.scrimId) {
+    const { value: s } = await store.get(job.data.scrimId, job.guild_id);
+    if (s.panel?.publicationJob === job.id && s.panel?.messageId) return;
+  }
+  await replyJob(env, job, content);
 }
 async function showFlow(store, s, actor, data) { const w = await store.wizard(actor.id, s.guildId, { sid: s.id, ...data }); return message(flowView(s, w)); }
 export async function routeInteraction(i, env, store, ctx) {
@@ -196,14 +221,14 @@ export async function runJob(env, id) {
   try {
     let s, notice = p.notice || '';
     if (p.kind === 'create') {
-      requireManager(p.actor); s = newScrim(`w${id}`, job.guild_id, p.data); s.panel = { channelId: p.channelId, messageId: null };
+      requireManager(p.actor); s = newScrim(`w${id}`, job.guild_id, p.data); s.panel = { channelId: p.channelId, messageId: null, ...(p.publicReply ? { transport: 'interaction', publicationJob: id } : {}) };
       await store.create(s); p.scrimId = s.id; s = (await store.get(s.id, job.guild_id)).value; notice = '내전 모집을 시작했습니다.';
     } else if (p.kind === 'refresh') { requireManager(p.actor); await store.markDirty(p.scrimId, job.guild_id); s = (await store.get(p.scrimId, job.guild_id)).value; notice = '공개 현황을 갱신합니다.'; }
     else if (p.kind === 'repairPanel') {
       requireManager(p.actor);
       const result = await store.mutate(p.scrimId, job.guild_id, id, state => {
         ensure(state.status !== 'ended', '종료된 내전입니다.');
-        if (!state.panel?.messageId || !state.panel?.channelId || ['undefined', 'null'].includes(String(state.panel.channelId)) || state.panel.deleted || state.panelError?.includes('10003')) state.panel = { channelId: p.channelId, messageId: null, nonce: id };
+        if (needsNewPanel(state)) state.panel = { channelId: p.channelId, messageId: null, nonce: id, ...(p.publicReply ? { transport: 'interaction', publicationJob: id } : {}) };
         return '기존 내전의 공개 패널을 복구합니다.';
       });
       s = result.state; notice = result.result;
@@ -236,6 +261,14 @@ export async function runJob(env, id) {
     }
     // Publication is a separate outcome: saved scrims/results must not be reported as lost.
     const needsPublication = ['create', 'refresh', 'repairPanel'].includes(p.kind);
+    if (p.publicReply && s) {
+      await wait(650);
+      const result = await flushPanel(env, store, s.id, s.guildId, true, job);
+      if (result?.pending) throw new Error('Public panel publication is busy; retry the durable job');
+      if (result?.superseded || result?.missing) await jobNotice(env, store, job, '공개 패널의 연결 상태가 변경됐습니다. /내전관리에서 최신 패널을 확인해주세요.');
+      await store.finishJob(job);
+      return;
+    }
     if (needsPublication && s) {
       try {
         await wait(650);
@@ -256,9 +289,9 @@ export async function runJob(env, id) {
   } catch (e) {
     if (e instanceof UserError || (e instanceof DiscordError && [400, 401, 403, 404].includes(e.status))) {
       const reason = e instanceof UserError ? e.message : describeDiscordError(e);
-      await replyJob(env, job, `⚠️ ${reason}`).catch(() => {}); await store.finishJob(job, 'failed', reason);
+      await jobNotice(env, store, job, `⚠️ ${reason}${p.publicReply ? '\n내전 데이터는 유지됩니다. /내전관리 → 패널 복구를 눌러주세요.' : ''}`).catch(() => {}); await store.finishJob(job, 'failed', reason);
     } else if (job.attempts >= 8 || Date.now() - job.created_at > 12 * 60_000) {
-      await replyJob(env, job, '⚠️ 일시 오류가 반복됐습니다. /내전상태로 반영 여부를 확인하고 다시 시도해주세요.').catch(() => {});
+      await jobNotice(env, store, job, '⚠️ 일시 오류가 반복됐습니다. /내전상태로 반영 여부를 확인하고 다시 시도해주세요.').catch(() => {});
       await store.finishJob(job, 'failed', 'Repeated transient failure'); console.error('Background job failed', job.id, e.status || e.name);
     } else {
       await store.checkpoint(job, p, Math.min(Math.max(e.retryAfter || 3000, 1000), 120_000));
@@ -287,7 +320,7 @@ async function scheduled(env) {
 export default {
   async fetch(request, env, ctx) {
     const path = new URL(request.url).pathname;
-    if (path === '/health' && request.method === 'GET') return Response.json({ ok: true, version: '2.0.3' });
+    if (path === '/health' && request.method === 'GET') return Response.json({ ok: true, version: '2.0.4' });
     if (request.method !== 'POST') return new Response('Not found', { status: 404 });
     const text = await request.text(); if (text.length > 65_536) return new Response('Too large', { status: 413 });
     if (path === '/_run') {
