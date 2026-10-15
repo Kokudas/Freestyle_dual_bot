@@ -40,11 +40,11 @@ export class Store {
     const r = await this.db.prepare('UPDATE wizards SET state=?,revision=revision+1 WHERE id=? AND owner_id=? AND revision=? AND expires_at>?').bind(JSON.stringify(w.data), w.id, w.ownerId, w.revision, Date.now()).run();
     ensure(r.meta.changes === 1, '선택 내용이 변경됐습니다. 참가 화면을 다시 열어주세요.'); w.revision++;
   }
-  async enqueue(i, actor, kind, data, scrimId = null, { publicReply = false } = {}) {
+  async enqueue(i, actor, kind, data, scrimId = null, { publicReply = false, replyView = null } = {}) {
     // Persist the job before acknowledging it. Interaction tokens are never logged.
     const channelId = interactionChannelId(i);
     ensure(channelId, '실행한 채널의 ID를 가져오지 못했습니다. 서버의 텍스트 채널에서 명령어를 다시 열어주세요.');
-    const payload = { applicationId: i.application_id, token: i.token, channelId, actor, kind, data, scrimId, publicReply };
+    const payload = { applicationId: i.application_id, token: i.token, channelId, actor, kind, data, scrimId, publicReply, replyView };
     await this.db.prepare('INSERT OR IGNORE INTO jobs(id,guild_id,payload,available_at,created_at) VALUES(?,?,?,?,?)').bind(i.id, i.guild_id, JSON.stringify(payload), Date.now(), Date.now()).run();
     return i.id;
   }

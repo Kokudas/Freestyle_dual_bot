@@ -1,7 +1,7 @@
 import { Store } from './storage.js';
 import { applyAction, newScrim, ensure, UserError, currentFixtures, teamById, lottery, ROLES } from './domain.js';
 import { message, note, defer, modal, setupView, registrationView, subView, publicPanel, adminPanel, flowView, esc, cut } from './ui.js';
-import { api, replyJob, DiscordError, describeDiscordError, discoverVoice, voiceTargets, moveVoiceChunk } from './discord.js';
+import { api, replyJob, DiscordError, describeDiscordError, diagnosePanelAccess, discoverVoice, voiceTargets, moveVoiceChunk } from './discord.js';
 
 const encoder = new TextEncoder();
 const hex = s => Uint8Array.from(s.match(/../g) || [], v => Number.parseInt(v, 16));
@@ -93,9 +93,11 @@ export async function flushPanel(env, store, id, guildId, force = false, publica
 }
 async function queue(i, env, store, actor, kind, data, scrimId, ctx) {
   const publicReply = kind === 'create' || (kind === 'repairPanel' && needsNewPanel((await store.get(scrimId, i.guild_id)).value));
-  const id = await store.enqueue(i, actor, kind, data, scrimId, { publicReply });
+  const update = !publicReply && Boolean(i.message?.flags & 64) && [3, 5].includes(i.type);
+  const replyView = update && String(i.data.custom_id || '').startsWith('a:') ? 'admin' : null;
+  const id = await store.enqueue(i, actor, kind, data, scrimId, { publicReply, replyView });
   ctx.waitUntil(runJob(env, id).catch(() => console.error('Job dispatch failed; scheduled retry retained.')));
-  return defer(!publicReply);
+  return defer(!publicReply, update);
 }
 async function jobNotice(env, store, job, content) {
   // Once the original response IS the public panel, a status notice would erase it.
@@ -103,9 +105,10 @@ async function jobNotice(env, store, job, content) {
     const { value: s } = await store.get(job.data.scrimId, job.guild_id);
     if (s.panel?.publicationJob === job.id && s.panel?.messageId) return;
   }
-  await replyJob(env, job, content);
+  const view = job.data.replyView === 'admin' && job.data.actor.manager && job.data.scrimId ? adminPanel((await store.get(job.data.scrimId, job.guild_id)).value) : null;
+  await replyJob(env, job, content, view);
 }
-async function showFlow(store, s, actor, data) { const w = await store.wizard(actor.id, s.guildId, { sid: s.id, ...data }); return message(flowView(s, w)); }
+async function showFlow(store, s, actor, data, update = false) { const w = await store.wizard(actor.id, s.guildId, { sid: s.id, ...data }); return message(flowView(s, w), update); }
 export async function routeInteraction(i, env, store, ctx) {
   if (i.type === 1) return { type: 1 };
   const actor = actorOf(i, env);
@@ -138,8 +141,8 @@ export async function routeInteraction(i, env, store, ctx) {
       requireManager(actor);
       if (['draft', 'finalize', 'voiceConnect', 'voiceTeams', 'voiceRoles', 'voiceWaiting', 'refresh', 'repairPanel'].includes(op)) return queue(i, env, store, actor, op, {}, s.id, ctx);
       ensure(s.status !== 'ended', '종료된 내전입니다.');
-      if (['finish', 'undo'].includes(op)) return showFlow(store, s, actor, { kind: 'confirm', op, label: op === 'finish' ? '내전 종료 (음성채널은 유지)' : '마지막 결과와 승점 취소' });
-      if (['substitute', 'captain', 'withdraw', 'points', 'fixtures'].includes(op)) { ensure(s.status === 'running', '편성 확정 후 사용할 수 있습니다.'); return showFlow(store, s, actor, { kind: 'flow', op }); }
+      if (['finish', 'undo'].includes(op)) return showFlow(store, s, actor, { kind: 'confirm', op, label: op === 'finish' ? '내전 종료 (음성채널은 유지)' : '마지막 결과와 승점 취소' }, Boolean(i.message?.flags & 64));
+      if (['substitute', 'captain', 'withdraw', 'points', 'fixtures'].includes(op)) { ensure(s.status === 'running', '편성 확정 후 사용할 수 있습니다.'); return showFlow(store, s, actor, { kind: 'flow', op }, Boolean(i.message?.flags & 64)); }
     } else {
       ensure(s.status !== 'ended', '종료된 내전입니다.');
       if (op === 'join') {
@@ -256,7 +259,7 @@ export async function runJob(env, id) {
       if (!p.voice) p.voice = { targets: await voiceTargets(env, s, p.kind === 'substitute' ? 'subVoice' : p.kind, p.data), index: 0, moved: 0, skipped: 0, failed: 0 };
       p.notice = notice;
       const finished = await moveVoiceChunk(env, job.guild_id, p.voice);
-      if (!finished) { await store.checkpoint(job, p); await replyJob(env, job, `🎤 이동 처리 중 (${p.voice.index}/${p.voice.targets.length})`); await nudge(env, { kind: 'job', id }).catch(() => {}); return; }
+      if (!finished) { await store.checkpoint(job, p); await jobNotice(env, store, job, `🎤 이동 처리 중 (${p.voice.index}/${p.voice.targets.length})`); await nudge(env, { kind: 'job', id }).catch(() => {}); return; }
       notice = `${notice ? notice + '\n' : ''}🎤 이동 ${p.voice.moved}명 · 미접속/조건 제외/이미 도착 ${p.voice.skipped}명 · 권한 등 실패 ${p.voice.failed}명`;
     }
     // Publication is a separate outcome: saved scrims/results must not be reported as lost.
@@ -275,17 +278,19 @@ export async function runJob(env, id) {
         const result = await flushPanel(env, store, s.id, s.guildId);
         notice += result?.published ? '\n공개 패널을 채널에 게시했습니다.' : result?.missing ? '\n⚠️ 공개 패널이 없습니다. /내전관리 → 패널 복구를 눌러주세요.' : '\n공개 패널 갱신을 처리 중입니다. 잠시 후 채널을 확인해주세요.';
       } catch (e) {
-        notice = `내전 데이터는 저장되어 있습니다. 공개 패널 전송에 실패했습니다.\n${e instanceof UserError ? e.message : describeDiscordError(e)}\n설정을 확인한 후 /내전관리 → 패널 복구를 눌러주세요. 새 내전을 다시 열거나 DB를 초기화할 필요는 없습니다.`;
-        await replyJob(env, job, `⚠️ ${notice}`); await store.finishJob(job); return;
+        const reason = p.kind === 'repairPanel' ? await diagnosePanelAccess(env, s, e) : e instanceof UserError ? e.message : describeDiscordError(e);
+        if (p.kind === 'repairPanel') await store.mutate(s.id, s.guildId, `diagnostic:${id}`, state => { state.panelError = reason; return '연결 점검 완료'; }, { dirty: false });
+        notice = `내전 데이터는 저장되어 있습니다. 공개 패널 전송에 실패했습니다.\n${reason}\n점검 후 패널 복구를 다시 눌러주세요. 새 내전을 다시 열거나 DB를 초기화할 필요는 없습니다.`;
+        await jobNotice(env, store, job, `⚠️ ${notice}`); await store.finishJob(job); return;
       }
     }
-    await replyJob(env, job, `✅ ${notice}`);
-    await store.finishJob(job);
     if (s && !needsPublication) {
       // Background panel errors cannot overwrite a successfully saved operation.
       try { await wait(650); await flushPanel(env, store, s.id, s.guildId); const fresh = await store.get(s.id, s.guildId); if (fresh.dirty_at != null) await nudge(env, { kind: 'panel', id: s.id, guildId: s.guildId }).catch(() => {}); }
-      catch { /* flushPanel retains dirty state and a safe diagnostic for recovery. */ }
+      catch { notice += '\n⚠️ 저장은 완료됐지만 공개 현황 갱신이 지연되고 있습니다. 운영진이 관리창에서 확인할 수 있습니다.'; }
     }
+    await jobNotice(env, store, job, `✅ ${notice}`);
+    await store.finishJob(job);
   } catch (e) {
     if (e instanceof UserError || (e instanceof DiscordError && [400, 401, 403, 404].includes(e.status))) {
       const reason = e instanceof UserError ? e.message : describeDiscordError(e);
@@ -320,7 +325,7 @@ async function scheduled(env) {
 export default {
   async fetch(request, env, ctx) {
     const path = new URL(request.url).pathname;
-    if (path === '/health' && request.method === 'GET') return Response.json({ ok: true, version: '2.0.4' });
+    if (path === '/health' && request.method === 'GET') return Response.json({ ok: true, version: '2.0.5' });
     if (request.method !== 'POST') return new Response('Not found', { status: 404 });
     const text = await request.text(); if (text.length > 65_536) return new Response('Too large', { status: 413 });
     if (path === '/_run') {

@@ -1,5 +1,12 @@
 import { UserError } from './domain.js';
-export const DISCORD_USER_AGENT = 'DiscordBot (https://developers.cloudflare.com/workers/, 2.0.4) FSR-Scrim-Workers';
+export const DISCORD_USER_AGENT = 'DiscordBot (https://developers.cloudflare.com/workers/, 2.0.5) FSR-Scrim-Workers';
+export function botToken(env) {
+  let value = String(env.DISCORD_TOKEN || '').trim();
+  if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1).trim();
+  value = value.replace(/^Bot\s+/i, '').trim();
+  if (!value || !/^[A-Za-z\d._-]+$/.test(value)) throw new UserError('DISCORD_TOKEN이 비어 있거나 형식이 올바르지 않습니다. Cloudflare Secret에 봇 토큰 값만 입력해주세요. 실제 토큰을 채팅에 올리지 마세요.');
+  return value;
+}
 export class DiscordError extends Error {
   constructor(status, retryAfter = 0, data = {}, scope = 'bot', diagnostic = {}) {
     super(`Discord API ${status}`); this.status = status; this.retryAfter = retryAfter;
@@ -7,6 +14,7 @@ export class DiscordError extends Error {
     this.responseType = diagnostic.responseType || null;
     this.edgeCode = diagnostic.edgeCode || null;
     this.requestKind = diagnostic.requestKind || null;
+    this.requestFormat = diagnostic.requestFormat || null;
     // Keep field names only. Discord's raw error text may contain submitted values.
     this.fields = [];
     const visit = (node, path = '') => {
@@ -19,7 +27,7 @@ export class DiscordError extends Error {
 }
 export function describeDiscordError(e) {
   if (!(e instanceof DiscordError)) return '일시적인 통신 오류입니다. 잠시 후 다시 시도해주세요.';
-  const code = `HTTP ${e.status}${e.code == null ? '' : ` / ${e.code}`}${e.edgeCode ? ` · edge ${e.edgeCode}` : ''}${e.responseType && e.code == null ? ` · 응답 ${e.responseType}` : ''}${e.requestKind ? ` · ${e.requestKind}` : ''}`;
+  const code = `HTTP ${e.status}${e.code == null ? '' : ` / ${e.code}`}${e.edgeCode ? ` · edge ${e.edgeCode}` : ''}${e.responseType && e.code == null ? ` · 응답 ${e.responseType}` : ''}${e.requestKind ? ` · ${e.requestKind}` : ''}${e.requestFormat ? ` · ${e.requestFormat}` : ''}`;
   let reason;
   if (e.status === 401) reason = e.scope === 'bot' ? 'Cloudflare의 DISCORD_TOKEN이 유효하지 않습니다. 현재 앱의 새 봇 토큰으로 교체해주세요.' : '결과 안내의 유효시간이 지났습니다. /내전상태로 반영 여부를 확인해주세요.';
   else if (e.code === 50001) reason = '봇이 이 서버에 설치되어 있는지와 해당 채널의 채널 보기 권한을 확인해주세요.';
@@ -34,25 +42,48 @@ export function describeDiscordError(e) {
   else reason = 'Discord 전송에 실패했습니다. 오류 코드와 해당 채널 설정을 확인해주세요.';
   return `${reason} (${code})`;
 }
-export async function api(env, path, { method = 'GET', body, token = true } = {}) {
-  const headers = { 'Content-Type': 'application/json', Accept: 'application/json', 'User-Agent': DISCORD_USER_AGENT }; if (token) headers.Authorization = `Bot ${env.DISCORD_TOKEN}`;
-  const response = await fetch(`https://discord.com/api/v10${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+export async function api(env, path, { method = 'GET', body, token = true, format = 'JSON' } = {}) {
+  const headers = { Accept: 'application/json', 'User-Agent': DISCORD_USER_AGENT }; if (token) headers.Authorization = `Bot ${botToken(env)}`;
+  let payload;
+  if (body !== undefined) {
+    if (format === 'multipart') { payload = new FormData(); payload.set('payload_json', JSON.stringify(body)); }
+    else { headers['Content-Type'] = 'application/json'; payload = JSON.stringify(body); }
+  }
+  const response = await fetch(`https://discord.com/api/v10${path}`, { method, headers, body: payload });
   // Retain safe metadata for non-JSON failures, without storing upstream text or values.
   const raw = response.status === 204 ? '' : await response.text();
   let data = null; try { data = raw ? JSON.parse(raw) : null; } catch { /* gateway/edge errors may be HTML or text */ }
+  // An empty 400 supplies no Discord validation details. Retry idempotent message
+  // edits once using Discord's documented payload_json multipart representation.
+  // Never retry permission/form errors, rate limits, or non-idempotent sends here.
+  if (response.status === 400 && !raw.trim() && token && method === 'PATCH' && /^\/channels\/[^/]+\/messages\/[^/]+$/.test(path) && body !== undefined && format === 'JSON') return api(env, path, { method, body, token, format: 'multipart' });
   if (!response.ok) {
     const responseType = data !== null ? 'JSON' : !raw.trim() ? 'empty' : /<(!doctype|html|head|body)\b/i.test(raw.slice(0, 2048)) ? 'HTML' : 'text';
     const match = raw.slice(0, 8192).match(/(?:error(?:\s+code)?|code)\s*[:#]?\s*(1\d{3})\b/i);
     const requestKind = /^\/channels\/[^/]+\/messages(?:\/[^/]+)?$/.test(path) ? `${method} channel-message` : path.startsWith('/webhooks/') ? `${method} interaction-response` : `${method} Discord-API`;
     const retry = data?.retry_after ?? response.headers.get('retry-after') ?? 1;
-    throw new DiscordError(response.status, response.status === 429 ? Math.max(1000, (Number(retry) || 1) * 1000) : 0, data, token ? 'bot' : 'interaction', { responseType, edgeCode: match ? Number(match[1]) : null, requestKind });
+    throw new DiscordError(response.status, response.status === 429 ? Math.max(1000, (Number(retry) || 1) * 1000) : 0, data, token ? 'bot' : 'interaction', { responseType, edgeCode: match ? Number(match[1]) : null, requestKind, requestFormat: body === undefined ? null : format });
   }
   return data;
 }
-export async function replyJob(env, job, content) {
+export async function replyJob(env, job, content, view = null) {
   if (Date.now() - job.created_at > 14 * 60_000) return;
-  try { await api(env, `/webhooks/${job.data.applicationId}/${job.data.token}/messages/@original`, { method: 'PATCH', token: false, body: { content: String(content).slice(0, 1900), embeds: [], components: [], allowed_mentions: { parse: [] } } }); }
+  try { await api(env, `/webhooks/${job.data.applicationId}/${job.data.token}/messages/@original`, { method: 'PATCH', token: false, body: { embeds: [], components: [], ...view, content: String(content).slice(0, 1900), allowed_mentions: { parse: [] } } }); }
   catch (e) { if (![401, 404].includes(e.status)) throw e; }
+}
+export async function diagnosePanelAccess(env, s, error) {
+  const reason = error instanceof UserError ? error.message : describeDiscordError(error);
+  if (!(error instanceof DiscordError) || error.status !== 400 || error.code != null || error.responseType !== 'empty') return reason;
+  // A bounded, read-only check separates authentication and channel access from
+  // message-body failures. Never expose account IDs, tokens, or upstream text.
+  try {
+    const user = await api(env, '/users/@me');
+    if (!user?.id) return `${reason}\nBot 인증 점검: 계정 정보가 없는 응답입니다.`;
+    if (env.APPLICATION_ID && user.id !== env.APPLICATION_ID) return `${reason}\nBot 인증 점검: DISCORD_TOKEN과 APPLICATION_ID가 서로 다른 앱입니다. 현재 앱의 봇 토큰으로 Secret을 수정해주세요.`;
+  } catch (e) { return `${reason}\n본문 없는 Bot 인증 점검도 실패했습니다: ${e instanceof UserError ? e.message : describeDiscordError(e)}`; }
+  try { await api(env, `/channels/${s.panel.channelId}`); }
+  catch (e) { return `${reason}\nBot 인증은 성공했지만 채널 조회가 실패했습니다: ${e instanceof UserError ? e.message : describeDiscordError(e)}`; }
+  return `${reason}\nBot 인증·채널 조회는 성공했습니다. 두 전송 형식 모두 메시지 수정 단계에서 실패했습니다.`;
 }
 export const normalize = s => String(s).normalize('NFKC').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
 export function channelByNames(channels, names) { const wanted = names.map(normalize); return channels.find(c => c.type === 2 && wanted.includes(normalize(c.name))); }
