@@ -1,4 +1,5 @@
 import { UserError, ensure } from './domain.js';
+export const interactionChannelId = i => [i.channel?.id, i.channel_id, i.message?.channel_id].find(id => typeof id === 'string' && /^\d{1,20}$/.test(id)) || null;
 export class Store {
   constructor(db) { this.db = db; }
   async active(guildId) { const row = await this.db.prepare("SELECT * FROM scrims WHERE guild_id=? AND status!='ended'").bind(guildId).first(); return row ? { ...row, value: JSON.parse(row.state) } : null; }
@@ -41,7 +42,9 @@ export class Store {
   }
   async enqueue(i, actor, kind, data, scrimId = null) {
     // Persist the job before acknowledging it. Interaction tokens are never logged.
-    const payload = { applicationId: i.application_id, token: i.token, channelId: i.channel_id, actor, kind, data, scrimId };
+    const channelId = interactionChannelId(i);
+    ensure(channelId, '실행한 채널의 ID를 가져오지 못했습니다. 서버의 텍스트 채널에서 명령어를 다시 열어주세요.');
+    const payload = { applicationId: i.application_id, token: i.token, channelId, actor, kind, data, scrimId };
     await this.db.prepare('INSERT OR IGNORE INTO jobs(id,guild_id,payload,available_at,created_at) VALUES(?,?,?,?,?)').bind(i.id, i.guild_id, JSON.stringify(payload), Date.now(), Date.now()).run();
     return i.id;
   }

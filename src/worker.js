@@ -40,6 +40,7 @@ export async function flushPanel(env, store, id, guildId, force = false) {
   try {
     const row = await store.get(id, guildId), s = row.value; snapshot = s; revision = row.revision;
     if (!s.panel || s.panel.deleted) { succeeded = true; return { missing: true }; }
+    ensure(s.panel.channelId && !['undefined', 'null'].includes(String(s.panel.channelId)), '공개 패널을 보낼 채널 ID가 저장되지 않았습니다. 현재 텍스트 채널에서 /내전관리 → 패널 복구를 눌러주세요.');
     const body = publicPanel(s);
     if (s.panel.messageId) {
       try { await api(env, `/channels/${s.panel.channelId}/messages/${s.panel.messageId}`, { method: 'PATCH', body }); }
@@ -202,7 +203,7 @@ export async function runJob(env, id) {
       requireManager(p.actor);
       const result = await store.mutate(p.scrimId, job.guild_id, id, state => {
         ensure(state.status !== 'ended', '종료된 내전입니다.');
-        if (!state.panel?.messageId || state.panel.deleted || state.panelError?.includes('10003')) state.panel = { channelId: p.channelId, messageId: null, nonce: id };
+        if (!state.panel?.messageId || !state.panel?.channelId || ['undefined', 'null'].includes(String(state.panel.channelId)) || state.panel.deleted || state.panelError?.includes('10003')) state.panel = { channelId: p.channelId, messageId: null, nonce: id };
         return '기존 내전의 공개 패널을 복구합니다.';
       });
       s = result.state; notice = result.result;
@@ -286,7 +287,7 @@ async function scheduled(env) {
 export default {
   async fetch(request, env, ctx) {
     const path = new URL(request.url).pathname;
-    if (path === '/health' && request.method === 'GET') return Response.json({ ok: true, version: '2.0.2' });
+    if (path === '/health' && request.method === 'GET') return Response.json({ ok: true, version: '2.0.3' });
     if (request.method !== 'POST') return new Response('Not found', { status: 404 });
     const text = await request.text(); if (text.length > 65_536) return new Response('Too large', { status: 413 });
     if (path === '/_run') {
