@@ -1,5 +1,5 @@
 import { Store } from './storage.js';
-import { applyAction, newScrim, ensure, UserError, currentFixtures, teamById, lottery, ROLES } from './domain.js';
+import { applyAction, newScrim, ensure, UserError, currentFixtures, teamById, lottery, ROLES, availableTeamNumbers } from './domain.js';
 import { message, note, defer, modal, setupView, registrationView, subView, publicPanel, adminPanel, flowView, esc, cut } from './ui.js';
 import { api, replyJob, DiscordError, describeDiscordError, diagnosePanelAccess, discoverVoice, voiceTargets, moveVoiceChunk } from './discord.js';
 
@@ -121,12 +121,13 @@ export async function routeInteraction(i, env, store, ctx) {
     }
     if (i.data.name === '내전열기') {
       requireManager(actor); ensure(!await store.active(i.guild_id), '이미 진행 중인 내전이 있습니다.');
-      const d = { kind: 'setup', title: String(options['제목'] || '프리스타일 리부트 클럽 내전').slice(0, 100), winPoints: options['승리승점'] ?? 1, mode: options['편성모드'] || null, endMode: options['종료방식'] || null, target: options['목표값'] ?? null };
+      const d = { kind: 'setup', title: String(options['제목'] || '프리스타일 리부트 클럽 내전').slice(0, 100), winPoints: options['승리승점'] ?? 1, mode: options['편성모드'] || null, endMode: options['종료방식'] || null, target: options['목표값'] ?? null, leagueRepeats: options['풀리그횟수'] ?? null };
       ensure(d.endMode || d.target == null, '목표값을 지정하려면 종료방식도 선택해주세요.');
       ensure(d.endMode !== 'round_robin' || d.target == null, '1회 풀리그에는 목표값이 필요하지 않습니다.');
-      if (d.mode && d.endMode && (d.endMode === 'round_robin' || d.target != null)) { newScrim('check', i.guild_id, d); return queue(i, env, store, actor, 'create', d, null, ctx); }
+      ensure(!d.endMode || d.endMode === 'round_robin' || d.leagueRepeats == null, '풀리그횟수는 풀리그 종료 방식에서만 지정해주세요.');
+      if (d.mode && d.endMode && (d.endMode === 'round_robin' ? d.leagueRepeats != null : d.target != null)) { newScrim('check', i.guild_id, d); return queue(i, env, store, actor, 'create', d, null, ctx); }
       const w = await store.wizard(actor.id, i.guild_id, d);
-      if (d.mode && d.endMode && d.target == null) return modal(`w:${w.id}:target`, '목표값 설정', '전체 최대 판수 또는 목표 승점', '', '예: 20');
+      if (d.mode && d.endMode && d.endMode !== 'round_robin' && d.target == null) return modal(`w:${w.id}:target`, '목표값 설정', '전체 최대 판수 또는 목표 승점', '', '예: 20');
       return message(setupView(w));
     }
     const row = await store.active(i.guild_id); ensure(row, '현재 진행 중인 내전이 없습니다.');
@@ -142,7 +143,10 @@ export async function routeInteraction(i, env, store, ctx) {
       if (['draft', 'finalize', 'voiceConnect', 'voiceTeams', 'voiceRoles', 'voiceWaiting', 'refresh', 'repairPanel'].includes(op)) return queue(i, env, store, actor, op, {}, s.id, ctx);
       ensure(s.status !== 'ended', '종료된 내전입니다.');
       if (['finish', 'undo'].includes(op)) return showFlow(store, s, actor, { kind: 'confirm', op, label: op === 'finish' ? '내전 종료 (음성채널은 유지)' : '마지막 결과와 승점 취소' }, Boolean(i.message?.flags & 64));
-      if (['substitute', 'captain', 'withdraw', 'points', 'fixtures'].includes(op)) { ensure(s.status === 'running', '편성 확정 후 사용할 수 있습니다.'); return showFlow(store, s, actor, { kind: 'flow', op }, Boolean(i.message?.flags & 64)); }
+      if (['substitute', 'captain', 'withdraw', 'points', 'fixtures', 'addTeam', 'cancelTeam'].includes(op)) { ensure(s.status === 'running', '편성 확정 후 사용할 수 있습니다.');
+        if (op === 'addTeam') ensure(availableTeamNumbers(s).length, '최대 20팀까지 편입할 수 있습니다.');
+        if (op === 'cancelTeam') ensure(s.pendingTeams?.length, '편입 대기 팀이 없습니다.');
+        return showFlow(store, s, actor, { kind: 'flow', op, ...(op === 'addTeam' ? { teamNo: availableTeamNumbers(s)[0], members: [], captainId: null } : {}) }, Boolean(i.message?.flags & 64)); }
     } else {
       ensure(s.status !== 'ended', '종료된 내전입니다.');
       if (op === 'join') {
@@ -155,6 +159,8 @@ export async function routeInteraction(i, env, store, ctx) {
       if (op === 'cancel') return showFlow(store, s, actor, { kind: 'confirm', op: 'cancel', label: '본인의 참가 신청 취소' });
       if (op === 'info') {
         const t = s.teams.find(t => t.members.some(m => m.id === actor.id)), p = s.participants.find(p => p.id === actor.id), sub = s.subs.find(p => p.id === actor.id);
+        const pending = (s.pendingTeams || []).find(t => t.members.some(m => m.id === actor.id));
+        if (pending) return note(`TEAM ${pending.no} · 편입 대기\nROUND ${pending.activateAfterRound} 종료 후 합류 예정${pending.captainId === actor.id ? ' · 팀장 👑' : ''}`);
         if (t) { const m = t.members.find(m => m.id === actor.id); return note(`TEAM ${t.no} · ${m.role}/${m.position}${t.captainId === actor.id ? ' · 팀장 👑' : ''}`); }
         return note(sub ? `대기/대타 · ${sub.roles.join('/')} · ${sub.positions.join('/')}` : p ? `${p.primaryRole}/${p.primaryPosition}\n보조 ${p.secondaryRole || '없음'}/${p.secondaryPosition || ''}\n${p.teamNo ? `TEAM ${p.teamNo} · ${p.fixedRole}` : '랜덤 배정'}` : '등록된 참가 정보가 없습니다.');
       }
@@ -178,7 +184,10 @@ export async function routeInteraction(i, env, store, ctx) {
       if (d.endMode !== 'round_robin' && d.target == null) return modal(`w:${w.id}:target`, '목표값 설정', '전체 최대 판수 또는 목표 승점');
     } else if (op === 'end') { ensure(d.mode && ['round_robin', 'match_limit', 'points_target'].includes(arg), '종료 방식을 확인해주세요.'); d.endMode = arg; await store.saveWizard(w); if (arg !== 'round_robin') return modal(`w:${w.id}:target`, '목표값 설정', '전체 최대 판수 또는 목표 승점');
     } else if (op === 'target') { d.target = number(formValue(i), 1, 999); await store.saveWizard(w); }
+    else if (op === 'repeats') { ensure(d.endMode === 'round_robin', '풀리그를 먼저 선택해주세요.'); d.leagueRepeats = number(i.data.values?.[0], 1, 10); await store.saveWizard(w); }
     else throw new UserError('설정 화면을 다시 열어주세요.');
+    if (d.endMode === 'round_robin' && d.leagueRepeats == null) return message(setupView(w), true);
+    if (d.endMode !== 'round_robin') d.leagueRepeats = null;
     newScrim('check', i.guild_id, d); return queue(i, env, store, actor, 'create', d, null, ctx);
   }
   const s = (await store.get(d.sid, i.guild_id)).value;
@@ -205,6 +214,27 @@ export async function routeInteraction(i, env, store, ctx) {
     ensure(kind, '결과를 다시 선택해주세요.'); return queue(i, env, store, actor, kind, { fixtureId: d.fixtureId, winner: arg }, s.id, ctx);
   }
   if (d.kind === 'flow') {
+    if (d.op === 'addTeam') {
+      ensure(s.status === 'running', '진행 중인 내전에서만 편입할 수 있습니다.');
+      d.members ||= [];
+      if (op === 'submit') { const data = { teamNo: d.teamNo, members: d.members, captainId: d.captainId }; const probe = structuredClone(s); applyAction(probe, { kind: 'addTeam', data }, actor); return queue(i, env, store, actor, 'addTeam', data, s.id, ctx); }
+      if (op === 'newnumber') { const no = number(i.data.values?.[0], 1, 20); ensure(availableTeamNumbers(s).includes(no), '해당 팀 번호는 이미 사용 중입니다.'); d.teamNo = no; }
+      else if (op === 'newplayer') {
+        ensure(Object.hasOwn(ROLES, arg), '역할을 확인해주세요.'); const uid = i.data.values?.[0], user = i.data.resolved?.users?.[uid], member = i.data.resolved?.members?.[uid];
+        ensure(user?.id === uid && member && !user.bot, '이 서버의 일반 회원을 선택해주세요.');
+        ensure(!d.members.some(m => m.id === uid && m.role !== arg), '서로 다른 선수 3명을 선택해주세요.');
+        d.members = d.members.filter(m => m.role !== arg); d.members.push({ id: uid, name: String(member.nick || user.global_name || user.username || uid).slice(0, 100), role: arg, position: null }); d.captainId = null;
+      } else if (op === 'newnext') { ensure(d.teamNo && d.members.length === 3, '팀 번호와 선수 3명을 선택해주세요.'); d.positions = true; }
+      else if (op === 'newback') d.positions = false;
+      else if (op === 'newposition') { const m = d.members.find(m => m.role === arg), pos = i.data.values?.[0]; ensure(m && ROLES[arg]?.includes(pos), '해당 역할의 포지션을 선택해주세요.'); m.position = pos; }
+      else if (op === 'newcaptain') { ensure(d.members.some(m => m.id === i.data.values?.[0]), '팀원 중 팀장을 선택해주세요.'); d.captainId = i.data.values[0]; }
+      else throw new UserError('편입 설정 화면을 다시 열어주세요.');
+      await store.saveWizard(w); return message(flowView(s, w), true);
+    }
+    if (d.op === 'cancelTeam') {
+      if (op === 'pendingteam') { ensure(s.pendingTeams?.some(t => t.id === i.data.values?.[0]), '편입 대기 팀을 선택해주세요.'); d.teamId = i.data.values[0]; await store.saveWizard(w); return message(flowView(s, w), true); }
+      ensure(op === 'submit' && d.teamId, '취소할 편입 대기 팀을 선택해주세요.'); return queue(i, env, store, actor, 'cancelTeam', { teamId: d.teamId }, s.id, ctx);
+    }
     if (op === 'pickteam') { teamById(s, i.data.values[0]); d.teamId = i.data.values[0];
       if (d.op === 'points') { await store.saveWizard(w); return modal(`w:${w.id}:pointsvalue`, '팀 승점 수정', '새 승점 (0~9999)', String(teamById(s, d.teamId).points)); }
     } else if (op === 'member') d.memberId = i.data.values[0];
@@ -241,9 +271,14 @@ export async function runJob(env, id) {
       if (!['register', 'subregister', 'cancel', 'report', 'confirm', 'dispute'].includes(p.kind)) requireManager(p.actor);
       let data = p.data;
       if (p.kind === 'voiceConnect') { s = (await store.get(p.scrimId, job.guild_id)).value; const voice = await discoverVoice(env, s); ensure(voice.waitingId && !voice.missing.length, '대기실 또는 팀 음성방이 없습니다: ' + voice.missing.join(', ')); data = voice; }
-      const result = await store.mutate(p.scrimId, job.guild_id, id, state => applyAction(state, { kind: p.kind, data }, p.actor)); s = result.state; notice = result.result;
+      const result = await store.mutate(p.scrimId, job.guild_id, id, state => {
+        const changes = state.rosterChanges?.length || 0;
+        const result = applyAction(state, { kind: p.kind, data }, p.actor);
+        if ((state.rosterChanges?.length || 0) > changes) state.rosterChanges.at(-1).operationId = id;
+        return result;
+      }); s = result.state; notice = result.result;
     }
-    if (p.kind === 'finalize') {
+    if (p.kind === 'finalize' || (s?.status === 'running' && s.rosterChanges?.some(change => change.operationId === id) && s.teams.some(t => t.joinedAt && !t.voiceId))) {
       try {
         const voice = await discoverVoice(env, s);
         ensure(voice.waitingId && !voice.missing.length, '대기실 또는 일부 팀 음성방을 찾을 수 없습니다.');
@@ -251,7 +286,7 @@ export async function runJob(env, id) {
         s = linked.state; notice += '\n기존 음성방을 자동 연결했습니다. 팀별 이동 버튼을 사용할 수 있습니다.';
       } catch (e) {
         if (!(e instanceof UserError) && !(e instanceof DiscordError && [400, 403, 404].includes(e.status))) throw e;
-        notice += '\n⚠️ 편성은 확정됐지만 음성방 연결이 필요합니다. 채널 이름·권한 확인 후 채널 연결을 눌러주세요.';
+        notice += '\n⚠️ 팀 편성은 반영됐지만 음성방 연결이 필요합니다. 채널 이름·권한 확인 후 채널 연결을 눌러주세요.';
       }
     }
     if (['voiceTeams', 'voiceRoles', 'voiceWaiting', 'substitute'].includes(p.kind)) {
@@ -325,7 +360,7 @@ async function scheduled(env) {
 export default {
   async fetch(request, env, ctx) {
     const path = new URL(request.url).pathname;
-    if (path === '/health' && request.method === 'GET') return Response.json({ ok: true, version: '2.0.5' });
+    if (path === '/health' && request.method === 'GET') return Response.json({ ok: true, version: '2.1.0' });
     if (request.method !== 'POST') return new Response('Not found', { status: 404 });
     const text = await request.text(); if (text.length > 65_536) return new Response('Too large', { status: 413 });
     if (path === '/_run') {
