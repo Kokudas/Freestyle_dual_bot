@@ -1,4 +1,5 @@
 import { Store } from './storage.js';
+import { waitingCaptain, enqueueResultTasks, runResultAlert, runAlertCleanup } from './alerts.js';
 import { applyAction, newScrim, ensure, UserError, currentFixtures, teamById, lottery, ROLES, availableTeamNumbers } from './domain.js';
 import { message, note, defer, modal, setupView, registrationView, subView, publicPanel, adminPanel, flowView, esc, cut } from './ui.js';
 import { api, replyJob, DiscordError, describeDiscordError, diagnosePanelAccess, discoverVoice, voiceTargets, moveVoiceChunk } from './discord.js';
@@ -100,6 +101,10 @@ async function queue(i, env, store, actor, kind, data, scrimId, ctx) {
   ctx.waitUntil(runJob(env, id).catch(() => console.error('Job dispatch failed; scheduled retry retained.')));
   return defer(!publicReply, update);
 }
+async function dispatchResultTasks(env, ids) {
+  if (env.WORKER_URL) { for (const id of ids) await nudge(env, { kind: 'job', id }).catch(() => {}); }
+  else if (ids[0]) await runJob(env, ids[0]).catch(() => console.error('Result alert task retained for scheduled recovery.'));
+}
 async function jobNotice(env, store, job, content) {
   // Once the original response IS the public panel, a status notice would erase it.
   if (job.data.publicReply && job.data.scrimId) {
@@ -166,6 +171,13 @@ export async function routeInteraction(i, env, store, ctx) {
     throw new UserError('등록되지 않은 명령어입니다. 명령어 등록 스크립트를 다시 실행해주세요.');
   }
   const parts = String(i.data.custom_id || '').split(':'), [scope, id, op, arg] = parts;
+  if (scope === 'c') {
+    const [, sid, fixtureId, reportId, recipientId, action] = parts;
+    ensure(i.type === 3 && parts.length === 6 && action === 'open', '서버의 최신 내전 패널에서 확인해주세요.');
+    const s = (await store.get(sid, i.guild_id)).value, f = s.fixtures.find(f => f.id === fixtureId);
+    ensure(f?.reportId === reportId && waitingCaptain(s, f) === actor.id && recipientId === actor.id, '현재 상대 팀장만 확인할 수 있거나 이미 처리된 결과입니다. 최신 내전 패널을 확인해주세요.');
+    return showFlow(store, s, actor, { kind: 'result', fixtureId, reportId, manager: false });
+  }
   if (scope === 'p' || scope === 'a') {
     const s = (await store.get(id, i.guild_id)).value;
     if (scope === 'a') {
@@ -198,7 +210,7 @@ export async function routeInteraction(i, env, store, ctx) {
         ensure(s.status === 'running', '진행 중인 내전이 아닙니다.');
         const t = s.teams.find(t => t.captainId === actor.id && !t.withdrawnAt); ensure(t, '현재 팀장만 결과를 처리할 수 있습니다.');
         const f = currentFixtures(s).find(f => [f.a, f.b].includes(t.id)); ensure(f, '이번 라운드는 휴식이거나 진행할 경기가 없습니다.'); ensure(f.status !== 'completed', '이번 라운드의 결과는 이미 확정됐습니다.');
-        return showFlow(store, s, actor, { kind: 'result', fixtureId: f.id, manager: false });
+        return showFlow(store, s, actor, { kind: 'result', fixtureId: f.id, reportId: f.reportId || null, manager: false });
       }
     }
     throw new UserError('지원하지 않는 버튼입니다.');
@@ -241,7 +253,7 @@ export async function routeInteraction(i, env, store, ctx) {
   if (d.kind === 'confirm') { ensure(op === 'submit', '확정 버튼을 눌러주세요.'); return queue(i, env, store, actor, d.op, {}, s.id, ctx); }
   if (d.kind === 'result') {
     const kind = op === 'winner' ? d.manager ? 'resolve' : 'report' : op === 'accept' ? 'confirm' : op === 'dispute' ? 'dispute' : null;
-    ensure(kind, '결과를 다시 선택해주세요.'); return queue(i, env, store, actor, kind, { fixtureId: d.fixtureId, winner: arg }, s.id, ctx);
+    ensure(kind, '결과를 다시 선택해주세요.'); return queue(i, env, store, actor, kind, { fixtureId: d.fixtureId, winner: arg, ...(['confirm', 'dispute'].includes(kind) && d.reportId ? { reportId: d.reportId } : {}) }, s.id, ctx);
   }
   if (d.kind === 'flow') {
     if (d.op === 'addTeam') {
@@ -281,6 +293,9 @@ export async function routeInteraction(i, env, store, ctx) {
 export async function runJob(env, id) {
   const store = new Store(env.DB), job = await store.claimJob(id); if (!job) return;
   if (job.data.kind === 'cleanupSetup') return runSetupCleanup(env, store, job);
+  if (job.data.kind === 'resultNotice') return store.finishJob(job); // Retire queued v2.2.0 DM jobs without sending.
+  if (job.data.kind === 'resultAlert') return dispatchResultTasks(env, await runResultAlert(env, store, job));
+  if (job.data.kind === 'cleanupResultAlert') return runAlertCleanup(env, store, job);
   const p = job.data;
   try {
     let s, notice = p.notice || '';
@@ -300,7 +315,7 @@ export async function runJob(env, id) {
     else if (['voiceTeams', 'voiceRoles', 'voiceWaiting'].includes(p.kind)) { requireManager(p.actor); s = (await store.get(p.scrimId, job.guild_id)).value; ensure(s.status !== 'ended', '종료된 내전입니다.'); }
     else {
       if (!['register', 'subregister', 'cancel', 'report', 'confirm', 'dispute'].includes(p.kind)) requireManager(p.actor);
-      let data = p.data;
+      let data = p.kind === 'report' ? { ...p.data, reportId: id } : p.data;
       if (p.kind === 'voiceConnect') { s = (await store.get(p.scrimId, job.guild_id)).value; const voice = await discoverVoice(env, s); ensure(voice.waitingId && !voice.missing.length, '대기실 또는 팀 음성방이 없습니다: ' + voice.missing.join(', ')); data = voice; }
       const result = await store.mutate(p.scrimId, job.guild_id, id, state => {
         const changes = state.rosterChanges?.length || 0;
@@ -309,6 +324,7 @@ export async function runJob(env, id) {
         return result;
       }); s = result.state; notice = result.result;
     }
+    const resultTaskIds = await enqueueResultTasks(env, store, job, s);
     if (p.kind === 'finalize' || (s?.status === 'running' && s.rosterChanges?.some(change => change.operationId === id) && s.teams.some(t => t.joinedAt && !t.voiceId))) {
       try {
         const voice = await discoverVoice(env, s);
@@ -362,6 +378,7 @@ export async function runJob(env, id) {
     }
     await jobNotice(env, store, job, `✅ ${notice}`);
     await store.finishJob(job);
+    await dispatchResultTasks(env, resultTaskIds);
   } catch (e) {
     if (e instanceof UserError || (e instanceof DiscordError && [400, 401, 403, 404].includes(e.status))) {
       const reason = e instanceof UserError ? e.message : describeDiscordError(e);
@@ -396,7 +413,7 @@ async function scheduled(env) {
 export default {
   async fetch(request, env, ctx) {
     const path = new URL(request.url).pathname;
-    if (path === '/health' && request.method === 'GET') return Response.json({ ok: true, version: '2.1.1' });
+    if (path === '/health' && request.method === 'GET') return Response.json({ ok: true, version: '2.3.0' });
     if (request.method !== 'POST') return new Response('Not found', { status: 404 });
     const text = await request.text(); if (text.length > 65_536) return new Response('Too large', { status: 413 });
     if (path === '/_run') {
@@ -410,7 +427,7 @@ export default {
     let interaction; try { interaction = JSON.parse(text); } catch { return new Response('Invalid JSON', { status: 400 }); }
     if (interaction.application_id && interaction.application_id !== env.APPLICATION_ID) return new Response('Invalid application', { status: 401 });
     try { return Response.json(await routeInteraction(interaction, env, new Store(env.DB), ctx)); }
-    catch (e) { if (!(e instanceof UserError)) console.error('Interaction failed', e.name); return Response.json(note(`⚠️ ${e instanceof UserError ? e.message : '일시 오류입니다. 잠시 후 다시 눌러주세요.'}`)); }
+    catch (e) { if (!(e instanceof UserError)) console.error('Interaction failed', e.name); const response = note(`⚠️ ${e instanceof UserError ? e.message : '일시 오류입니다. 잠시 후 다시 눌러주세요.'}`); if (!interaction.guild_id) delete response.data.flags; return Response.json(response); }
   },
   scheduled(event, env, ctx) { ctx.waitUntil(scheduled(env)); },
 };

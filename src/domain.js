@@ -283,9 +283,10 @@ export function applyAction(s, action, actor, rng = Math.random) {
   if (['report', 'confirm', 'dispute', 'resolve'].includes(action.kind)) {
     const f = activeFixture(s, d.fixtureId);
     if (action.kind !== 'resolve') captainFor(s, f, actor.id);
-    if (action.kind === 'report') { ensure(f.status === 'pending', '이미 결과가 제출됐습니다. 다시 경기 종료를 눌러 확인해주세요.'); ensure([f.a, f.b].includes(d.winner), '승리 팀이 잘못되었습니다.'); f.reporter = actor.id; f.proposed = d.winner; f.status = 'reported'; return '결과를 제출했습니다. 상대 팀장이 경기 종료 버튼에서 확인해주세요.'; }
+    if (action.kind === 'report') { ensure(f.status === 'pending', '이미 결과가 제출됐습니다. 다시 경기 종료를 눌러 확인해주세요.'); ensure([f.a, f.b].includes(d.winner), '승리 팀이 잘못되었습니다.'); f.reporter = actor.id; f.proposed = d.winner; f.reportId = d.reportId || null; f.resultAlert = null; f.status = 'reported'; return '결과를 제출했습니다. 패널 채널에서 상대 팀장을 멘션합니다. 알림 또는 공개 패널의 경기 종료 버튼에서 확인해주세요.'; }
     if (action.kind === 'confirm' || action.kind === 'dispute') {
       ensure(f.status === 'reported' && f.reporter !== actor.id, '상대 팀장이 제출한 결과만 확인할 수 있습니다.');
+      ensure(!d.reportId || d.reportId === f.reportId, '다시 제출된 결과입니다. 최신 알림 또는 공개 패널의 경기 종료 버튼에서 확인해주세요.');
       if (action.kind === 'dispute') { f.status = 'disputed'; return '결과 불일치로 운영진 판정을 요청했습니다.'; }
     }
     const winner = action.kind === 'resolve' ? d.winner : f.proposed;

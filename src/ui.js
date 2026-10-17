@@ -80,19 +80,29 @@ export function publicPanel(s) {
   } else {
     const fixtures = currentFixtures(s);
     add('📊 경기 진행 현황', progressText(s));
-    if (!ended && fixtures.length) add(`⚔️ 현재 경기 · ROUND ${fixtures[0].round}`, fixtures.map(f => `${{ pending: '⚔️', reported: '⏳', disputed: '⚠️', completed: '✅' }[f.status]} TEAM ${teamById(s, f.a).no} vs TEAM ${teamById(s, f.b).no}${f.status === 'completed' ? ` → TEAM ${teamById(s, f.winner).no} ${f.resultType === 'forfeit' ? '몰수승' : '승리'}` : f.status === 'reported' ? ' · 상대 확인 대기' : f.status === 'disputed' ? ' · 운영진 판정 필요' : ' · 진행/대기'}`).join('\n') + '\n휴식: ' + (s.teams.filter(t => !t.withdrawnAt && !fixtures.some(f => [f.a, f.b].includes(t.id))).map(t => `TEAM ${t.no}`).join(', ') || '없음'));
+    if (!ended && fixtures.length) add(`⚔️ 현재 경기 · ROUND ${fixtures[0].round}`, fixtures.map(f => `${{ pending: '⚔️', reported: '⏳', disputed: '⚠️', completed: '✅' }[f.status]} TEAM ${teamById(s, f.a).no} vs TEAM ${teamById(s, f.b).no}${f.status === 'completed' ? ` → TEAM ${teamById(s, f.winner).no} ${f.resultType === 'forfeit' ? '몰수승' : '승리'}` : f.status === 'reported' ? ` · 상대 확인 대기${f.resultAlert?.status === 'failed' ? ' · 알림 전달 불가 (경기 종료에서 확인)' : ''}` : f.status === 'disputed' ? ' · 운영진 판정 필요' : ' · 진행/대기'}`).join('\n') + '\n휴식: ' + (s.teams.filter(t => !t.withdrawnAt && !fixtures.some(f => [f.a, f.b].includes(t.id))).map(t => `TEAM ${t.no}`).join(', ') || '없음'));
     if (s.pendingTeams?.length) add(`➕ 편입 대기 ${s.pendingTeams.length}팀`, s.pendingTeams.map(t => `TEAM ${t.no} · ROUND ${t.activateAfterRound} 종료 후 합류\n` + t.members.map(m => `${m.role}: ${esc(cut(m.name, 18))}${m.id === t.captainId ? ' 👑' : ''}`).join(' · ')).join('\n'));
     if (s.rosterChanges?.length) add('🔁 팀 편입 안내', '완료된 경기·승점 유지. ' + (s.endMode === 'round_robin' ? '편입 시 진행 중 회차부터 새 팀 수로 다시 편성했습니다. 합류 시점에 따라 누적 경기 수는 다를 수 있습니다.' : '새 팀은 다음 라운드부터 참여하며 0점으로 시작합니다.'));
     const ranked = [...s.teams].sort((a, b) => Boolean(a.withdrawnAt) - Boolean(b.withdrawnAt) || b.points - a.points || a.no - b.no);
     add(ended ? '🏆 최종 순위' : '🏆 현재 순위', ranked.map(t => `${t.withdrawnAt ? '🏳️' : (1 + ranked.filter(x => !x.withdrawnAt && x.points > t.points).length) + '위'} TEAM ${t.no} · ${t.points}점${t.withdrawnAt ? ' · 기권' : ''}`).join('\n'));
     if (ended && s.completedAt) add('🏁 최종 결과', leaders(s).map(t => `TEAM ${t.no} · ${t.points}점`).join(', ') || '우승 팀 없음');
   }
-  for (let i = 0; i < s.teams.length; i += 2) add('👥 팀 명단', s.teams.slice(i, i + 2).map(t => `**TEAM ${t.no}${t.withdrawnAt ? ' · 기권' : ''}**\n` + t.members.map(m => `${m.id === t.captainId ? '👑' : '•'} ${m.role}/${m.position} ${esc(cut(m.name, s.teams.length > 10 ? 14 : 28))}${m.isSub ? ' 🔄' : ''}`).join('\n')).join('\n\n'));
+  const rosterFields = [];
+  for (let i = 0; i < s.teams.length; i += 2) {
+    add(i === 0 ? '👥 팀 명단' : '\u200b', s.teams.slice(i, i + 2).map(t => `**TEAM ${t.no}${t.withdrawnAt ? ' · 기권' : ''}**\n` + t.members.map(m => `${m.id === t.captainId ? '👑' : '•'} ${m.role}/${m.position} ${esc(cut(m.name, s.teams.length > 10 ? 14 : 28))}${m.isSub ? ' 🔄' : ''}`).join('\n')).join('\n\n'));
+    rosterFields.push(embed.fields.at(-1));
+  }
   if (s.subs.length) add(`🪑 대기/대타 ${s.subs.length}명`, s.subs.slice(0, 8).map(p => `${esc(cut(p.name, 24))} · ${p.roles.join('/')}${(s.pendingTeams || []).some(t => t.members.some(m => m.id === p.id)) ? ' · 편입 예약' : ''}`).join('\n') + (s.subs.length > 8 ? `\n외 ${s.subs.length - 8}명` : ''));
   let size = () => (embed.title.length + embed.description.length + embed.fields.reduce((n, f) => n + f.name.length + f.value.length, 0));
-  while (size() > 5700) { const f = [...embed.fields].filter(f => f.name !== '👥 팀 명단' && f.value.length > 150).sort((a, b) => b.value.length - a.value.length)[0]; if (!f) break; f.value = cut(f.value, f.value.length - 100); }
+  while (size() > 5700) { const f = [...embed.fields].filter(f => !rosterFields.includes(f) && f.value.length > 150).sort((a, b) => b.value.length - a.value.length)[0]; if (!f) break; f.value = cut(f.value, f.value.length - 100); }
   const prefix = `p:${s.id}`;
   return { embeds: [embed], allowed_mentions: { parse: [] }, components: [row(button('개인 참가', `${prefix}:join`, 1, !recruiting), button('대타 등록', `${prefix}:sub`, 3, ended), button('참가 취소', `${prefix}:cancel`, 4, ended), button('내 정보', `${prefix}:info`, 2, ended)), row(button('⚔️ 경기 종료', `${prefix}:result`, 3, s.status !== 'running'))] };
+}
+export const resultAlertId = (sid, fixtureId, reportId, recipientId) => `c:${sid}:${fixtureId}:${reportId}:${recipientId}:open`;
+export function resultAlert(s, f, recipientId) {
+  return { content: `<@${recipientId}> ROUND ${f.round} · TEAM ${teamById(s, f.a).no} vs TEAM ${teamById(s, f.b).no} 경기 결과를 확인해주세요.`,
+    allowed_mentions: { parse: [], users: [recipientId] }, embeds: [],
+    components: [row(button('결과 확인하기', resultAlertId(s.id, f.id, f.reportId, recipientId), 3))] };
 }
 export function progressText(s) {
   const lastRound = Math.max(0, ...s.fixtures.map(f => f.round));
@@ -119,7 +129,7 @@ export function flowView(s, w) {
     const f = s.fixtures.find(f => f.id === d.fixtureId); if (!f) return { content: '경기 정보가 변경됐습니다.', components: [] };
     const title = `**ROUND ${f.round} · TEAM ${teamById(s, f.a).no} vs TEAM ${teamById(s, f.b).no}**`;
     if (d.manager || f.status === 'pending') return { content: `${title}\n승리 팀을 선택하세요.`, embeds: [], components: [row(...[f.a, f.b].map(t => button(`TEAM ${teamById(s, t).no} 승리`, `${p}:winner:${t}`, 1)))] };
-    if (f.status === 'reported' && f.reporter !== w.ownerId) return { content: `${title}\n상대 팀장이 TEAM ${teamById(s, f.proposed).no} 승리로 제출했습니다.`, embeds: [], components: [row(button('결과 확인', `${p}:accept`, 3), button('결과가 다름', `${p}:dispute`, 4))] };
+    if (f.status === 'reported' && f.reporter !== w.ownerId) return { content: `${title}\n상대 팀장이 제출한 결과입니다.\n🏆 TEAM ${teamById(s, f.proposed).no} 승리\nTEAM ${teamById(s, f.proposed === f.a ? f.b : f.a).no} 패배\n결과가 맞으면 확인해주세요.`, embeds: [], components: [row(button('결과 확인', `${p}:accept`, 3), button('결과가 다름', `${p}:dispute`, 4))] };
     return { content: f.status === 'reported' ? '상대 팀장의 결과 확인을 기다리고 있습니다.' : '운영진의 결과 판정을 기다리고 있습니다.', embeds: [], components: [] };
   }
   if (d.op === 'fixtures') return { content: '**현재 라운드 대진 관리**', embeds: [], components: [select(`${p}:fixture`, '판정할 경기 선택', currentFixtures(s).filter(f => f.status !== 'completed').map(f => ({ label: `R${f.round} TEAM ${teamById(s, f.a).no} vs TEAM ${teamById(s, f.b).no}`, value: f.id })))] };

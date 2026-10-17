@@ -1,6 +1,6 @@
 {
   "name": "fsr-scrim-workers",
-  "version": "2.1.1",
+  "version": "2.3.0",
   "private": true,
   "engines": { "node": ">=22.0.0" },
   "type": "module",
@@ -8,7 +8,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "test": "node --test --test-concurrency=1 tests/*.test.mjs",
-    "check": "node --check src/worker.js && node --check src/domain.js && node --check src/ui.js && node --check src/storage.js && node --check src/discord.js",
+    "check": "node --check src/worker.js && node --check src/alerts.js && node --check src/domain.js && node --check src/ui.js && node --check src/storage.js && node --check src/discord.js",
     "register": "node --env-file-if-exists=.dev.vars scripts/register-commands.mjs",
     "db:local": "wrangler d1 migrations apply fsr-scrim --local",
     "db:remote": "wrangler d1 migrations apply fsr-scrim --remote"
