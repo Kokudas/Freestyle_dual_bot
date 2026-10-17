@@ -1,5 +1,5 @@
 import { UserError } from './domain.js';
-export const DISCORD_USER_AGENT = 'DiscordBot (https://developers.cloudflare.com/workers/, 2.1.0) FSR-Scrim-Workers';
+export const DISCORD_USER_AGENT = 'DiscordBot (https://developers.cloudflare.com/workers/, 2.1.1) FSR-Scrim-Workers';
 export function botToken(env) {
   let value = String(env.DISCORD_TOKEN || '').trim();
   if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) value = value.slice(1, -1).trim();

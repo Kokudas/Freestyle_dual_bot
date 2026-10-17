@@ -6,7 +6,7 @@ from pathlib import Path
 import zipfile
 
 root = Path(__file__).resolve().parents[1]
-allowed_top = {'README.md', 'CLOUDFLARE_GUIDE.md', 'MIGRATION_GUIDE.md', 'USER_GUIDE.md', 'VALIDATION.md', 'UPDATE_PANEL_FIX.md', 'UPDATE_HTTP400.md', 'UPDATE_PUBLIC_RESPONSE.md', 'UPDATE_EDIT_FIX.md', 'UPDATE_LEAGUE_ADMISSION.md', 'package.json', 'package-lock.json', 'wrangler.jsonc', '.dev.vars.example', '.gitignore'}
+allowed_top = {'README.md', 'CLOUDFLARE_GUIDE.md', 'MIGRATION_GUIDE.md', 'USER_GUIDE.md', 'VALIDATION.md', 'UPDATE_PANEL_FIX.md', 'UPDATE_HTTP400.md', 'UPDATE_PUBLIC_RESPONSE.md', 'UPDATE_EDIT_FIX.md', 'UPDATE_LEAGUE_ADMISSION.md', 'UPDATE_SETUP_CLEANUP.md', 'package.json', 'package-lock.json', 'wrangler.jsonc', '.dev.vars.example', '.gitignore'}
 allowed_dirs = {'src', 'scripts', 'migrations', 'tests'}
 files = sorted(p for p in root.rglob('*') if p.is_file() and '__pycache__' not in p.parts and (p.relative_to(root).as_posix() in allowed_top or (p.relative_to(root).parts[0] in allowed_dirs and p.suffix in {'.js', '.mjs', '.py', '.sql', '.md', '.json'})))
 version = json.loads((root / 'package.json').read_text())['version']

@@ -95,7 +95,8 @@ async function queue(i, env, store, actor, kind, data, scrimId, ctx) {
   const publicReply = kind === 'create' || (kind === 'repairPanel' && needsNewPanel((await store.get(scrimId, i.guild_id)).value));
   const update = !publicReply && Boolean(i.message?.flags & 64) && [3, 5].includes(i.type);
   const replyView = update && String(i.data.custom_id || '').startsWith('a:') ? 'admin' : null;
-  const id = await store.enqueue(i, actor, kind, data, scrimId, { publicReply, replyView });
+  const { setupResponse = null, ...config } = kind === 'create' ? data : {};
+  const id = await store.enqueue(i, actor, kind, kind === 'create' ? config : data, scrimId, { publicReply, replyView, setupResponse });
   ctx.waitUntil(runJob(env, id).catch(() => console.error('Job dispatch failed; scheduled retry retained.')));
   return defer(!publicReply, update);
 }
@@ -109,6 +110,33 @@ async function jobNotice(env, store, job, content) {
   await replyJob(env, job, content, view);
 }
 async function showFlow(store, s, actor, data, update = false) { const w = await store.wizard(actor.id, s.guildId, { sid: s.id, ...data }); return message(flowView(s, w), update); }
+async function enqueueSetupCleanup(store, job) {
+  const p = job.data, source = p.setupResponse;
+  // The final component/modal token owns the PUBLIC panel. Delete only the
+  // earlier slash response that originally created the private setup screen.
+  if (p.kind !== 'create' || !source?.token || !source.wizardId || source.applicationId !== p.applicationId || source.interactionId === job.id || source.token === p.token) return null;
+  const id = `setup-cleanup:${job.id}`;
+  await store.enqueue({ id, application_id: source.applicationId, token: source.token, guild_id: job.guild_id, channel_id: p.channelId }, p.actor, 'cleanupSetup', { wizardId: source.wizardId, expiresAt: source.expiresAt }, p.scrimId);
+  return id;
+}
+async function runSetupCleanup(env, store, job) {
+  const p = job.data;
+  const finish = async (status = 'done', reason = null) => { await store.deleteWizard(p.data.wizardId, p.actor.id, job.guild_id); await store.finishJob(job, status, reason); };
+  try {
+    if (Number.isFinite(p.data.expiresAt) && Date.now() < p.data.expiresAt) {
+      const delay = job.created_at + 1000 - Date.now(); if (delay > 0) await wait(delay);
+      await api(env, `/webhooks/${p.applicationId}/${p.token}/messages/@original`, { method: 'DELETE', token: false });
+    }
+    await finish();
+  } catch (e) {
+    if (e instanceof DiscordError && [401, 404].includes(e.status)) { await finish(); return; }
+    const retryable = !(e instanceof UserError) && (!(e instanceof DiscordError) || e.status === 429 || e.status >= 500);
+    if (retryable && job.attempts < 5 && Date.now() < p.data.expiresAt) {
+      await store.checkpoint(job, p, Math.min(Math.max(e.retryAfter || 3000, 1000), 60_000));
+      console.error('Setup screen cleanup deferred', job.id, e.status || e.name);
+    } else { await finish('failed', `Setup cleanup failed: ${e.status || e.name}`); }
+  }
+}
 export async function routeInteraction(i, env, store, ctx) {
   if (i.type === 1) return { type: 1 };
   const actor = actorOf(i, env);
@@ -126,8 +154,10 @@ export async function routeInteraction(i, env, store, ctx) {
       ensure(d.endMode !== 'round_robin' || d.target == null, '1회 풀리그에는 목표값이 필요하지 않습니다.');
       ensure(!d.endMode || d.endMode === 'round_robin' || d.leagueRepeats == null, '풀리그횟수는 풀리그 종료 방식에서만 지정해주세요.');
       if (d.mode && d.endMode && (d.endMode === 'round_robin' ? d.leagueRepeats != null : d.target != null)) { newScrim('check', i.guild_id, d); return queue(i, env, store, actor, 'create', d, null, ctx); }
+      const directModal = d.mode && d.endMode && d.endMode !== 'round_robin' && d.target == null;
+      if (!directModal) d.setupResponse = { applicationId: i.application_id, token: i.token, interactionId: i.id, expiresAt: Date.now() + 14.5 * 60_000 };
       const w = await store.wizard(actor.id, i.guild_id, d);
-      if (d.mode && d.endMode && d.endMode !== 'round_robin' && d.target == null) return modal(`w:${w.id}:target`, '목표값 설정', '전체 최대 판수 또는 목표 승점', '', '예: 20');
+      if (directModal) return modal(`w:${w.id}:target`, '목표값 설정', '전체 최대 판수 또는 목표 승점', '', '예: 20');
       return message(setupView(w));
     }
     const row = await store.active(i.guild_id); ensure(row, '현재 진행 중인 내전이 없습니다.');
@@ -188,7 +218,7 @@ export async function routeInteraction(i, env, store, ctx) {
     else throw new UserError('설정 화면을 다시 열어주세요.');
     if (d.endMode === 'round_robin' && d.leagueRepeats == null) return message(setupView(w), true);
     if (d.endMode !== 'round_robin') d.leagueRepeats = null;
-    newScrim('check', i.guild_id, d); return queue(i, env, store, actor, 'create', d, null, ctx);
+    newScrim('check', i.guild_id, d); return queue(i, env, store, actor, 'create', { ...d, ...(d.setupResponse ? { setupResponse: { ...d.setupResponse, wizardId: w.id } } : {}) }, null, ctx);
   }
   const s = (await store.get(d.sid, i.guild_id)).value;
   if (d.kind === 'register') {
@@ -250,6 +280,7 @@ export async function routeInteraction(i, env, store, ctx) {
 }
 export async function runJob(env, id) {
   const store = new Store(env.DB), job = await store.claimJob(id); if (!job) return;
+  if (job.data.kind === 'cleanupSetup') return runSetupCleanup(env, store, job);
   const p = job.data;
   try {
     let s, notice = p.notice || '';
@@ -300,11 +331,16 @@ export async function runJob(env, id) {
     // Publication is a separate outcome: saved scrims/results must not be reported as lost.
     const needsPublication = ['create', 'refresh', 'repairPanel'].includes(p.kind);
     if (p.publicReply && s) {
-      await wait(650);
-      const result = await flushPanel(env, store, s.id, s.guildId, true, job);
+      // A retry may only need to enqueue setup cleanup or finish the job. The
+      // original public response is already durable, even when dirty_at is clear.
+      const alreadyPublished = s.panel?.publicationJob === id && s.panel.messageId && !s.panel.deleted;
+      if (!alreadyPublished) await wait(650);
+      const result = alreadyPublished ? { published: true } : await flushPanel(env, store, s.id, s.guildId, true, job);
       if (result?.pending) throw new Error('Public panel publication is busy; retry the durable job');
       if (result?.superseded || result?.missing) await jobNotice(env, store, job, '공개 패널의 연결 상태가 변경됐습니다. /내전관리에서 최신 패널을 확인해주세요.');
+      const cleanupId = result?.published ? await enqueueSetupCleanup(store, job) : null;
       await store.finishJob(job);
+      if (cleanupId) await runJob(env, cleanupId).catch(() => console.error('Setup cleanup retained for scheduled recovery.'));
       return;
     }
     if (needsPublication && s) {
@@ -360,7 +396,7 @@ async function scheduled(env) {
 export default {
   async fetch(request, env, ctx) {
     const path = new URL(request.url).pathname;
-    if (path === '/health' && request.method === 'GET') return Response.json({ ok: true, version: '2.1.0' });
+    if (path === '/health' && request.method === 'GET') return Response.json({ ok: true, version: '2.1.1' });
     if (request.method !== 'POST') return new Response('Not found', { status: 404 });
     const text = await request.text(); if (text.length > 65_536) return new Response('Too large', { status: 413 });
     if (path === '/_run') {
